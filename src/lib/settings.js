@@ -14,6 +14,7 @@ export const DEFAULTS = {
   accent: "us", // us | uk
   level: "intermediate", // beginner | intermediate | advanced
   mode: "immersive", // immersive | assisted
+  stepMode: true, // 逐句模式：每句话后看完老师反馈再点“下一句”
 };
 
 export const LIVE_VOICES = ["Puck", "Charon", "Kore", "Fenrir", "Aoede", "Leda", "Orus", "Zephyr"];

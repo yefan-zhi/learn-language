@@ -42,6 +42,16 @@ class ViewMissions extends HTMLElement {
             ${seg("mode", MODES, getSetting("mode"))}
             <small class="opt-desc" id="mode-desc"></small>
           </div>
+          <div class="opt">
+            <label>逐句模式</label>
+            <div class="opt-switch">
+              <div class="segmented" id="step-seg">
+                <button data-val="on" class="${getSetting("stepMode") ? "active" : ""}">开</button>
+                <button data-val="off" class="${getSetting("stepMode") ? "" : "active"}">关</button>
+              </div>
+            </div>
+            <small class="opt-desc">开启后，每说完一句先看完老师点评，再点“下一句”继续；对话中也可以随时切换。</small>
+          </div>
         </div>
 
         <p class="quota-line" id="quota-line" hidden></p>
@@ -55,7 +65,14 @@ class ViewMissions extends HTMLElement {
     };
     updateModeDesc();
 
-    this.querySelectorAll(".segmented").forEach((segEl) => {
+    this.querySelector("#step-seg").addEventListener("click", (e) => {
+      const b = e.target.closest("button");
+      if (!b) return;
+      this.querySelectorAll("#step-seg button").forEach((x) => x.classList.toggle("active", x === b));
+      setSetting("stepMode", b.dataset.val === "on");
+    });
+
+    this.querySelectorAll(".segmented[data-name]").forEach((segEl) => {
       segEl.addEventListener("click", (e) => {
         const b = e.target.closest("button");
         if (!b) return;

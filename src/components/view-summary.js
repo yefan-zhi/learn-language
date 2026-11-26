@@ -1,7 +1,7 @@
 /**
  * 总结页：整体评价 + 逐句回放（我的录音 / 地道说法 / 老师点评语音）
  */
-import { summarizeSession, teacherTTS, nativeTTS, speakBrowser, stopBrowserSpeech } from "../lib/teacher.js";
+import { summarizeSession, teacherTTS, nativeTTS, wordTTS, speakBrowser, stopBrowserSpeech } from "../lib/teacher.js";
 import { saveSession, deleteSession } from "../lib/history.js";
 import { int16ToWavBlob, formatDuration } from "../lib/audio-utils.js";
 import { escapeHtml, feedbackHtml } from "../lib/dom.js";
@@ -234,9 +234,27 @@ class ViewSummary extends HTMLElement {
   setPlaying(btn) {
     this.stopAll();
     this.playingBtn = btn;
-    btn.dataset.label = btn.dataset.label || btn.textContent;
     btn.classList.add("playing");
+    if (btn.classList.contains("word-say")) return; // 单词按钮只改颜色，不改文字
+    btn.dataset.label = btn.dataset.label || btn.textContent;
     btn.textContent = btn.dataset.label.replace("▶", "■");
+  }
+
+  /** 发音问题里的单词：按口音 TTS（先慢后正常），失败时用浏览器语音 */
+  async playWord(btn, word) {
+    if (this.playingBtn === btn) return this.stopAll();
+    this.stopAll();
+    btn.disabled = true;
+    try {
+      const pcm = await wordTTS(word, this._s.accent);
+      btn.disabled = false;
+      this.playPcm(btn, pcm, 24000);
+    } catch {
+      btn.disabled = false;
+      this.setPlaying(btn);
+      await speakBrowser(`${word}. ${word}.`, (ACCENTS[this._s.accent] || ACCENTS.us).bcp47, 0.8);
+      if (this.playingBtn === btn) this.resetPlaying();
+    }
   }
 
   playPcm(btn, pcm, rate) {
@@ -277,6 +295,8 @@ class ViewSummary extends HTMLElement {
       this.playPcm(btn, t.pcm, 16000);
     } else if (act === "native" && t.analysis) {
       this.playNative(btn, t.analysis.better_expression);
+    } else if (act === "word" && btn.dataset.word) {
+      this.playWord(btn, btn.dataset.word);
     } else if (act === "teacher" && t.analysis) {
       if (this.playingBtn === btn) return this.stopAll();
       if (t.teacherPcm) return this.playPcm(btn, t.teacherPcm, 24000);

@@ -17,7 +17,12 @@ export function feedbackHtml(a, { compact = false } = {}) {
   if (!a) return "";
   if (a.no_speech) return `<div class="fb-muted">（这句没听清你的英语，跳过点评）</div>`;
   const pron = (a.pronunciation || [])
-    .map((p) => `<li><b class="en">${escapeHtml(p.word)}</b>：${escapeHtml(p.problem_zh)}<br><span class="tip">👉 ${escapeHtml(p.tip_zh)}</span></li>`)
+    .map(
+      (p) =>
+        `<li><button class="word-say" data-act="word" data-word="${escapeHtml(p.word)}" title="点击听 ${escapeHtml(p.word)} 的标准发音"><b class="en">${escapeHtml(p.word)}</b><span class="spk" aria-hidden="true">🔈</span></button>${
+          p.ipa ? `<span class="ipa">${escapeHtml(p.ipa)}</span>` : ""
+        }：${escapeHtml(p.problem_zh)}<br><span class="tip">👉 ${escapeHtml(p.tip_zh)}</span></li>`
+    )
     .join("");
   return `
     <div class="fb-head"><span class="stars">${stars(a.rating)}</span>${a.natural ? `<span class="tag good">表达地道</span>` : `<span class="tag warn">可以更地道</span>`}</div>

@@ -18,6 +18,7 @@ const FEEDBACK_SCHEMA = {
         type: "OBJECT",
         properties: {
           word: { type: "STRING" },
+          ipa: { type: "STRING", description: "该单词按所选口音的标准 IPA 音标，例如 /ˈkɑːfi/（可选）" },
           problem_zh: { type: "STRING" },
           tip_zh: { type: "STRING" },
         },
@@ -41,7 +42,7 @@ function teacherSystem(accentKey, level) {
 你会收到：学生刚说的这句话的录音、语音识别文本（可能不准）、以及对话上下文。请：
 1. 以录音为准，写出学生实际说了什么（transcript，保留语法错误，不要替学生改正）。
 2. 判断表达是否地道：${a.en} 的母语者在这个场景下会不会这样说？语法、用词、搭配、礼貌程度是否合适？给出更地道的说法 better_expression（符合${a.short}用词习惯，例如美式 apartment/subway/check，英式 flat/tube/bill）。如果原句已经很地道，natural=true，better_expression 给原句或略作润色。
-3. 仔细听发音：指出你确实清楚听到的单词发音问题（元音长短、th/v/w/l/r/n 等辅音、词尾辅音吞音或加多余元音、单词重音位置等），以 ${a.short}标准发音为参照。只说真实听到的问题，不要编造；没有就返回空数组；最多 3 个。
+3. 仔细听发音：指出你确实清楚听到的单词发音问题（元音长短、th/v/w/l/r/n 等辅音、词尾辅音吞音或加多余元音、单词重音位置等），以 ${a.short}标准发音为参照。只说真实听到的问题，不要编造；没有就返回空数组；最多 3 个。每个问题的 word 只写一个英文单词（或固定短语），并在 ipa 里给出它的${a.short}标准 IPA 音标（${accentKey === "uk" ? "英式 RP，例如 /ˈkɒfi/" : "美式 General American，例如 /ˈkɑːfi/"}，带斜杠）。
 4. 语调：句子重音、疑问句升降调、意群停顿、连读和节奏是否自然，用中文简要说明（intonation_zh）。
 5. spoken_feedback_zh：用中文写一段会被朗读出来的点评，像老师当面说话：2~4 句，口语化、温和、具体。先简短肯定一个优点，再讲最重要的 1~2 个问题和怎么改（需要时直接说出英文单词或句子）。不要用 markdown、括号注释、列表或特殊符号。
 6. rating：1~5 分综合评分（表达 + 发音 + 流利度）。
@@ -109,6 +110,69 @@ export function nativeTTS(text, accentKey) {
   return nativeCache.get(k);
 }
 
+/** 单词发音（发音问题里的单词）：先慢读一遍，再正常速度读一遍。内存 + IndexedDB 缓存 */
+const wordMem = new Map();
+const WORD_DB = "ll-audio-cache";
+function wordDb() {
+  return new Promise((resolve, reject) => {
+    try {
+      const req = indexedDB.open(WORD_DB, 1);
+      req.onupgradeneeded = () => req.result.createObjectStore("words");
+      req.onsuccess = () => resolve(req.result);
+      req.onerror = () => reject(req.error);
+    } catch (e) {
+      reject(e);
+    }
+  });
+}
+async function wordDbGet(k) {
+  try {
+    const db = await wordDb();
+    return await new Promise((resolve) => {
+      const r = db.transaction("words").objectStore("words").get(k);
+      r.onsuccess = () => resolve(r.result ? new Int16Array(r.result) : null);
+      r.onerror = () => resolve(null);
+    });
+  } catch {
+    return null;
+  }
+}
+async function wordDbPut(k, pcm) {
+  try {
+    const db = await wordDb();
+    db.transaction("words", "readwrite").objectStore("words").put(pcm.buffer.slice(0), k);
+  } catch {}
+}
+export const wordTTSStats = { requests: 0, memHits: 0, dbHits: 0 };
+export function wordTTS(word, accentKey) {
+  const w = String(word || "").trim();
+  const k = `${accentKey === "uk" ? "uk" : "us"}|${w.toLowerCase()}`;
+  if (wordMem.has(k)) {
+    wordTTSStats.memHits++;
+    return wordMem.get(k);
+  }
+  const p = (async () => {
+    const cached = await wordDbGet(k);
+    if (cached && cached.length) {
+      wordTTSStats.dbHits++;
+      return cached;
+    }
+    wordTTSStats.requests++;
+    const accent = accentKey === "uk" ? "standard southern British (RP)" : "General American";
+    const pcm = await geminiTTS(
+      `Say this word clearly in a ${accent} accent, first slowly and carefully, then once more at normal speed, with a short pause in between: ${w} ... ${w}`,
+      getSetting("characterVoice")
+    );
+    wordDbPut(k, pcm);
+    return pcm;
+  })().catch((e) => {
+    wordMem.delete(k);
+    throw e;
+  });
+  wordMem.set(k, p);
+  return p;
+}
+
 /** 浏览器自带语音合成（兜底/快速模式） */
 let voicesReady = null;
 function loadVoices() {
@@ -134,7 +198,7 @@ export function unlockBrowserSpeech() {
   } catch {}
 }
 
-export async function speakBrowser(text, lang = "zh-CN") {
+export async function speakBrowser(text, lang = "zh-CN", rate = 1.0) {
   if (!("speechSynthesis" in window)) throw new Error("浏览器不支持语音合成");
   const voices = await loadVoices();
   const voice =
@@ -146,7 +210,7 @@ export async function speakBrowser(text, lang = "zh-CN") {
     const u = new SpeechSynthesisUtterance(text);
     u.lang = lang;
     if (voice) u.voice = voice;
-    u.rate = 1.0;
+    u.rate = rate;
     u.onend = resolve;
     u.onerror = resolve;
     speechSynthesis.speak(u);

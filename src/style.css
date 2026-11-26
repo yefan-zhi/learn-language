@@ -487,3 +487,29 @@ details *, details *::before, details *::after { box-sizing: border-box; }
 .opt-desc { display: block; margin-top: 6px; color: var(--color-text-sub); font-size: .8rem; }
 [hidden] { display: none !important; }
 #auth-tabs button { white-space: normal; line-height: 1.2; }
+
+/* 逐句模式 */
+.step-chip { padding: 6px 10px; font-size: .78rem; flex-shrink: 0; }
+.step-panel {
+  display: flex; align-items: center; justify-content: space-between; gap: 8px; flex-wrap: wrap;
+  background: var(--color-accent-glow); border: 1px solid var(--color-accent-primary); color: var(--color-text-main);
+  border-radius: 12px; padding: 8px 12px; font-size: .9rem; font-weight: 700; margin-bottom: 6px;
+}
+.link-btn { background: none; color: var(--color-text-sub); text-decoration: underline; font-size: .82rem; font-weight: 700; padding: 2px 4px; }
+.controls .cta-btn.compact { flex: 0 0 auto; padding: 14px 16px; background: var(--color-surface); color: var(--color-danger); border: 1px solid var(--color-danger); box-shadow: none; }
+.controls .next-btn { background: var(--color-accent-primary); }
+.opt-switch { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+
+/* 可点击发音的单词、卡片上的播放按钮 */
+.word-say {
+  display: inline-flex; align-items: center; gap: 3px; background: rgba(127,127,127,.12); color: var(--color-text-main);
+  border: 1px solid transparent; border-radius: 8px; padding: 1px 6px; font-size: inherit; line-height: 1.5; vertical-align: baseline;
+}
+.word-say .spk { font-size: .8em; opacity: .75; }
+.word-say:hover { border-color: var(--color-accent-primary); }
+.word-say.playing { background: var(--color-accent-primary); color: #fff; }
+.word-say.playing .en { color: #fff; }
+.word-say:disabled { opacity: .6; }
+.ipa { margin-left: 4px; color: var(--color-text-sub); font-family: "Lucida Sans Unicode", "Arial Unicode MS", "Noto Sans", sans-serif; font-size: .9em; }
+.play-mini.playing { background: var(--color-accent-primary); }
+.tc-actions { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
