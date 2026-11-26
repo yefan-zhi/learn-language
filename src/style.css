@@ -536,3 +536,26 @@ details *, details *::before, details *::after { box-sizing: border-box; }
 .credit a { color: inherit; text-decoration: underline; }
 .controls .next-btn { display: inline-flex; flex-direction: column; align-items: center; line-height: 1.15; white-space: nowrap; }
 .btn-sub { display: block; font-size: .7rem; font-weight: 700; opacity: .85; margin-top: 2px; }
+
+/* 老师语音开关（对话页顶部） */
+.voice-chip { padding: 6px 10px; font-size: .78rem; flex-shrink: 0; }
+.voice-chip.muted {
+  color: var(--color-danger); border: 1px solid var(--color-danger);
+  background: color-mix(in srgb, var(--color-danger) 14%, var(--color-surface));
+}
+@media (max-width: 420px) {
+  .chat-top { gap: 6px; }
+  .voice-chip .vc-word { display: none; }
+  .voice-chip, .step-chip { padding: 6px 8px; }
+}
+
+/* “这次由你先开口”提示框 */
+.opener-box {
+  border: 2px solid var(--color-accent-secondary); border-radius: 16px; padding: 12px 14px;
+  background: var(--color-surface); display: flex; flex-direction: column; gap: 6px; overflow-wrap: anywhere;
+}
+.opener-box .ob-title { font-weight: 800; font-size: 1.05rem; color: var(--color-accent-secondary); }
+.opener-box .ob-hint { line-height: 1.5; }
+.opener-box .ob-sub { font-size: .8rem; color: var(--color-text-sub); font-weight: 700; margin-top: 2px; }
+.opener-box .ob-line { display: flex; align-items: flex-start; gap: 6px; line-height: 1.45; }
+.opener-box .ob-line span { flex: 1; min-width: 0; }

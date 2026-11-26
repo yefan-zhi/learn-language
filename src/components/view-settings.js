@@ -79,6 +79,14 @@ class ViewSettings extends HTMLElement {
               <label class="check"><input type="checkbox" id="singleModelMode" ${s.singleModelMode ? "checked" : ""}> 单模型模式（角色和老师由同一个实时模型担任，点评更快，但会共用一个声音）</label>
               <label class="check"><input type="checkbox" id="teacherVoiceOn" ${s.teacherVoiceOn ? "checked" : ""}> 老师每句话后用语音点评</label>
               <label class="field">
+                <span>谁先开口</span>
+                <select id="opener">
+                  <option value="random" ${s.opener !== "partner" && s.opener !== "me" ? "selected" : ""}>每次随机</option>
+                  <option value="partner" ${s.opener === "partner" ? "selected" : ""}>对方先开口</option>
+                  <option value="me" ${s.opener === "me" ? "selected" : ""}>我先开口</option>
+                </select>
+              </label>
+              <label class="field">
                 <span>老师点评语言</span>
                 <select id="teacherLanguage">
                   <option value="zh" ${s.teacherLanguage !== "en" ? "selected" : ""}>中文</option>
@@ -265,6 +273,7 @@ class ViewSettings extends HTMLElement {
       setSetting("teacherVoiceSource", $("teacherVoiceSource").value);
       setSetting("teacherSpeed", $("teacherSpeed").value);
       setSetting("teacherLanguage", $("teacherLanguage").value);
+      setSetting("opener", $("opener").value);
       setSetting("detailedTiming", $("detailedTiming").checked);
       setSetting("teacherVoice", $("teacherVoice").value);
       setSetting("characterVoice", $("characterVoice").value);

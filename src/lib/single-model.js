@@ -2,34 +2,82 @@
 // - 提示词里的“老师协议”
 // - give_feedback 工具定义，以及把它的参数转成卡片用的点评对象
 // - 把一轮模型输出（转写文字 + 音频）拆成“老师”部分和“角色”部分
-import { ACCENTS, teacherLang, coachMarkers } from "./settings.js";
+import { ACCENTS, teacherLang } from "./settings.js";
 import { rms } from "./audio-utils.js";
 
 /** 追加在角色提示词后面的双角色协议 */
-export function coachProtocol(accentKey, langKey, { stepMode = false } = {}) {
+export const COACH_MUTE_SIGNAL =
+  "[coach voice muted] From now on, for each learner turn ONLY call give_feedback (still fill spoken_feedback) and do NOT say any coach comment out loud at all. Everything else stays the same. Do not reply to this message.";
+export const COACH_UNMUTE_SIGNAL =
+  "[coach voice on] From now on, after calling give_feedback, speak the coach part out loud again exactly as described in your instructions. Do not reply to this message.";
+
+export function coachProtocol(accentKey, langKey, { stepMode = false, coachMuted = false } = {}) {
   const a = ACCENTS[accentKey] || ACCENTS.us;
   const L = teacherLang(langKey, accentKey);
-  const M = coachMarkers(L.key);
   const langName = L.key === "en" ? `simple, clear ${a.en}` : "Simplified Chinese (简体中文)";
+  const coachStep = `Speak as the COACH: 1-3 short sentences in ${langName}: one quick, specific bit of praise, then the single most important fix, saying the better English wording out loud. Do NOT start with any label such as "Coach", "老师" or "Teacher" and do not announce that you are switching roles: just start talking. Use a calm, warm, slightly slower teacher voice that sounds clearly different from the character. Keep it under about 15 seconds.`;
   return `
 TWO VOICES — CHARACTER + COACH:
-In this session you play two voices: (1) the CHARACTER described above, and (2) a warm, experienced English speaking COACH who briefly comments on each thing the learner says. The learner is a native Mandarin Chinese speaker practising ${a.en}.
+In this session you play two voices: (1) the CHARACTER described above, and (2) a warm, experienced English speaking COACH who briefly comments on each thing the learner says. The learner is a native Mandarin Chinese speaker practising ${a.en}. The app tells the two voices apart by your tool calls, so follow the order below exactly.
 
-After EVERY learner turn in which they attempt to speak English, respond in this exact order${stepMode ? "" : ", all in the same response"}:
+After EVERY learner turn in which they attempt to speak English:
 STEP 1 — Call the give_feedback tool FIRST, before saying anything at all. Base it on what you actually HEARD in the learner's audio (pronunciation of individual sounds, word stress, intonation, rhythm, linking), not only on the words. Only report pronunciation problems you clearly heard; never invent problems. ${L.instruction} The fields transcript and better_expression are always in English. Use ${a.en} as the reference accent and vocabulary.
-STEP 2 — Speak as the COACH. Begin with exactly "${M.start}" and then say 1-3 short sentences in ${langName}: one quick, specific bit of praise, then the single most important fix, saying the better English wording out loud. Use a calm, warm, slightly slower teacher voice that sounds clearly different from the character. Keep it under about 15 seconds. Finish the coach part with exactly "${M.end}"
+STEP 2 — ${coachStep}
 ${
     stepMode
-      ? `STEP 3 — STOP after the coach part and stay silent. Do NOT reply as the character yet. Only when you receive the text message "[continue]" do you reply as the CHARACTER, in English with your ${a.en} accent (1-2 sentences), to the learner's last line, continuing the scene naturally (no coach part, no tool call for "[continue]"). If the learner speaks again before "[continue]" (a new attempt), treat it as a new learner turn and do STEPS 1-2 again. A text message starting with "[redo]" means: forget the learner's previous attempt and your feedback on it, say nothing, and wait for their new attempt.`
-      : `STEP 3 — Switch back to the CHARACTER and reply in English with your ${a.en} accent (1-2 sentences), continuing the scene naturally.`
+      ? `STEP 3 — STOP after the coach part and stay completely silent. Do NOT reply as the character yet, not even a short line. Only when you receive the text message "[continue]" do you reply as the CHARACTER, in English with your ${a.en} accent (1-2 sentences), to the learner's last line, continuing the scene naturally (no coach part and no tool call for "[continue]"). If the learner speaks again before "[continue]" (a new attempt), treat it as a new learner turn and do STEPS 1-2 again. A text message starting with "[redo]" means: forget the learner's previous attempt and your feedback on it, say nothing, and wait for their new attempt. Never call resume_roleplay in this session.`
+      : `STEP 3 — Call the resume_roleplay tool (no arguments). This marks the end of the coach part.
+STEP 4 — Only after resume_roleplay, reply as the CHARACTER in English with your ${a.en} accent (1-2 sentences), continuing the scene naturally.`
   }
 
 Rules:
 - The CHARACTER never corrects the learner's English and never mentions the coach. All corrections come only from the coach.
-- Never put the character's lines before the coach part.${stepMode ? "\n- Text messages in square brackets such as \"[continue]\", \"[redo]\" or \"[START]\" are control signals from the app, not the learner's words: never comment on them." : ""}
-- If the learner spoke Chinese, said nothing meaningful, or you could not hear them clearly: do NOT call give_feedback. Instead say "${M.start}" plus ONE short hint in ${langName} (for example the English phrase they could use), finish with "${M.end}", then let the character continue or ask them to say it again.
+- Never speak the character's lines before the coach part${stepMode ? ', and never speak as the character before "[continue]"' : " or before calling resume_roleplay"}.
+- Text messages in square brackets such as "[continue]", "[redo]" or "[START]" are control signals from the app, not the learner's words: never comment on them.
+- If the learner spoke Chinese, said nothing meaningful, or you could not hear them clearly: do NOT call give_feedback. Give ONE short hint in ${langName} as the coach (for example the English phrase they could use)${stepMode ? ", then stop and wait" : ", then call resume_roleplay and let the character continue or ask them to say it again"}.
 - No coach part and no give_feedback for "[START]", for your opening line, or for anything that is not the learner's own speech.
-- Never read tool arguments out loud and never describe the tool call.`;
+- Never read tool arguments out loud and never describe the tool calls.
+- Messages starting with "[coach voice muted]" or "[coach voice on]" are app settings, not learner speech: say nothing in response, just follow them from then on. While the coach voice is muted, skip STEP 2 completely (still do STEP 1 and fill spoken_feedback; then ${stepMode ? "stay silent and wait for \"[continue]\"" : "go straight to STEP 3 and STEP 4"}).${
+    coachMuted ? `\n- The coach voice is currently MUTED (as if you had received "[coach voice muted]").` : ""
+  }`;
+}
+
+/** resume_roleplay：实时单模型里“老师说完、角色开始”的分界 */
+export function resumeRoleplayDeclaration(modelName = "") {
+  const decl = {
+    name: "resume_roleplay",
+    description: "Call this right after you finish the spoken coach comment and right before you speak as the character again. No arguments.",
+    parameters: { type: "OBJECT", properties: {} },
+  };
+  if (/think/i.test(modelName)) decl.behavior = "NON_BLOCKING";
+  return decl;
+}
+
+/** give_feedback / resume_roleplay 的工具响应：顺便再提醒一次接下来该做什么 */
+export function toolNextHint(name, { stepMode = false, coachMuted = false } = {}) {
+  if (name === "resume_roleplay") return "Now reply as the character in English.";
+  const say = coachMuted ? "Do NOT speak the coach comment (coach voice is muted)." : "Now say your short spoken coach comment (no label or prefix).";
+  return stepMode
+    ? `${say} Then STOP and stay silent: wait for [continue] before speaking as the character.`
+    : `${say} Then call resume_roleplay, then reply as the character.`;
+}
+
+/**
+ * 兜底清理角色文字：去掉开头残留的“老师：/Coach:”等字样；
+ * 老师语言是中文时，把夹在角色台词里的大段中文挪回老师卡片。
+ */
+export function cleanCharacterText(text, langKey) {
+  let t = (text || "").replace(/^\s*(?:老\s*师|教\s*练|coach|teacher)\s*[：:，,。.]?\s*/i, "");
+  if (langKey === "en") return { character: t.trim(), moved: "" };
+  const parts = t.match(/[^。！？!?.]+[。！？!?.]*/g) || (t ? [t] : []);
+  const keep = [];
+  const moved = [];
+  for (const p of parts) {
+    const cjk = (p.match(/[㐀-鿿]/g) || []).length;
+    if (cjk >= 4) moved.push(p.trim());
+    else keep.push(p);
+  }
+  return { character: keep.join("").trim(), moved: moved.join(" ").trim() };
 }
 
 /** give_feedback 工具定义（字段和独立老师的卡片一一对应） */
@@ -63,7 +111,7 @@ export function giveFeedbackDeclaration(accentKey, langKey, modelName = "") {
           },
         },
         intonation: { type: "STRING", description: `Sentence stress, rising/falling tone, pausing, linking, rhythm (${lang}).` },
-        spoken_feedback: { type: "STRING", description: `Exactly what the coach is about to say out loud (${lang}), 1-3 short sentences, without the "Coach/老师" prefix.` },
+        spoken_feedback: { type: "STRING", description: `Exactly what the coach is about to say out loud (${lang}), 1-3 short sentences, with no label or prefix.` },
       },
       required: ["transcript", "rating", "natural", "better_expression", "spoken_feedback"],
     },

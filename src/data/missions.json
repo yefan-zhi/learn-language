@@ -9,7 +9,19 @@
     "role_zh": "热情的邻居",
     "role_en": "an excited, chatty new neighbour",
     "scenario_en": "The learner has just moved into an apartment building in {city} and meets you in the hallway.",
-    "goal_en": "The learner introduces themself (name, where they are from) and asks how you are."
+    "goal_en": "The learner introduces themself (name, where they are from) and asks how you are.",
+    "opener_hint_zh": "你在楼道里碰到新邻居，主动打个招呼、自我介绍一下。",
+    "opener_hint_en": "You meet your new neighbour in the hallway. Say hi and introduce yourself.",
+    "opener_lines": {
+      "us": [
+        "Hi, I'm your new neighbor. I just moved in next door.",
+        "Hey there! I don't think we've met. I'm in apartment 3B."
+      ],
+      "uk": [
+        "Hi, I'm your new neighbour. I've just moved in next door.",
+        "Hello! I don't think we've met. I'm at number 12."
+      ]
+    }
   },
   {
     "id": "coffee",
@@ -21,7 +33,19 @@
     "role_zh": "手忙脚乱的咖啡师",
     "role_en": "a flustered, slightly panicked barista during the morning rush",
     "scenario_en": "A busy coffee shop in {city} in the morning.",
-    "goal_en": "The learner orders a coffee (size, milk preference) and a pastry to take away, and pays."
+    "goal_en": "The learner orders a coffee (size, milk preference) and a pastry to take away, and pays.",
+    "opener_hint_zh": "你走到柜台前，向店员点一杯咖啡和一个糕点。",
+    "opener_hint_en": "Walk up to the counter and order a coffee and a pastry.",
+    "opener_lines": {
+      "us": [
+        "Hi, can I get a medium latte and a blueberry muffin, please?",
+        "Morning! Could I get a coffee to go?"
+      ],
+      "uk": [
+        "Hiya, could I have a medium latte and a croissant, please?",
+        "Morning! Can I get a flat white to take away?"
+      ]
+    }
   },
   {
     "id": "hotel",
@@ -33,7 +57,19 @@
     "role_zh": "礼貌的前台",
     "role_en": "a polite but very procedural hotel receptionist",
     "scenario_en": "The front desk of a mid-range hotel in {city}. The learner has a reservation.",
-    "goal_en": "The learner checks in, confirms the booking, and asks about breakfast time and the Wi-Fi."
+    "goal_en": "The learner checks in, confirms the booking, and asks about breakfast time and the Wi-Fi.",
+    "opener_hint_zh": "你拖着行李走到前台，说明你要办理入住。",
+    "opener_hint_en": "You arrive at the front desk with your luggage. Say you'd like to check in.",
+    "opener_lines": {
+      "us": [
+        "Hi, I have a reservation under the name Li. I'd like to check in.",
+        "Hello, I'm checking in. The reservation should be under Li."
+      ],
+      "uk": [
+        "Hello, I've got a booking under the name Li. I'd like to check in, please.",
+        "Hi, I'm here to check in. The booking's under Li."
+      ]
+    }
   },
   {
     "id": "ticket",
@@ -45,7 +81,19 @@
     "role_zh": "不耐烦的售票员",
     "role_en": "an impatient ticket clerk at a public transport station",
     "scenario_en": "A ticket window at a busy {city} transit station (subway in New York, Tube/rail in London).",
-    "goal_en": "The learner finds out which ticket they need to get downtown / to the city centre, the price, and buys it."
+    "goal_en": "The learner finds out which ticket they need to get downtown / to the city centre, the price, and buys it.",
+    "opener_hint_zh": "你走到售票窗口，说你要去市中心，问买哪种票。",
+    "opener_hint_en": "Go to the ticket window, say you need to get downtown and ask which ticket to buy.",
+    "opener_lines": {
+      "us": [
+        "Hi, I need to get downtown. Which ticket should I buy?",
+        "Excuse me, how much is a one-way ticket to the city center?"
+      ],
+      "uk": [
+        "Hi, I need to get into the city centre. Which ticket do I need?",
+        "Excuse me, how much is a single to the city centre?"
+      ]
+    }
   },
   {
     "id": "dinner",
@@ -57,7 +105,19 @@
     "role_zh": "犹豫不决的室友 Jack",
     "role_en": "Jack, an indecisive roommate/flatmate who keeps changing his mind",
     "scenario_en": "At home in {city} on a Friday evening. Jack is hungry.",
-    "goal_en": "The learner finds out what Jack wants, agrees on a cuisine, and decides what to order."
+    "goal_en": "The learner finds out what Jack wants, agrees on a cuisine, and decides what to order.",
+    "opener_hint_zh": "你走进客厅，问室友晚饭想吃什么。",
+    "opener_hint_en": "Walk into the living room and ask your flatmate what they want for dinner.",
+    "opener_lines": {
+      "us": [
+        "Hey Jack, I'm starving. What do you want for dinner?",
+        "Want to order some takeout tonight? What are you in the mood for?"
+      ],
+      "uk": [
+        "Hiya Jack, I'm starving. What do you fancy for dinner?",
+        "Shall we get a takeaway tonight? What are you in the mood for?"
+      ]
+    }
   },
   {
     "id": "return",
@@ -69,7 +129,19 @@
     "role_zh": "开朗的店员",
     "role_en": "a cheerful shop assistant who keeps suggesting an exchange instead of a refund",
     "scenario_en": "A clothing store in {city}. The learner bought a shirt yesterday and it is the wrong size.",
-    "goal_en": "The learner explains the problem and gets a refund (or knowingly accepts an exchange)."
+    "goal_en": "The learner explains the problem and gets a refund (or knowingly accepts an exchange).",
+    "opener_hint_zh": "你拿着衬衫走到收银台，说尺码不对，想退款。",
+    "opener_hint_en": "Bring the shirt to the counter, explain it's the wrong size and ask for a refund.",
+    "opener_lines": {
+      "us": [
+        "Hi, I bought this shirt yesterday, but it's the wrong size. Can I get a refund?",
+        "Excuse me, I'd like to return this shirt. It doesn't fit."
+      ],
+      "uk": [
+        "Hi, I bought this shirt yesterday but it's the wrong size. Could I get a refund?",
+        "Excuse me, I'd like to return this shirt. It doesn't fit."
+      ]
+    }
   },
   {
     "id": "directions",
@@ -81,7 +153,19 @@
     "role_zh": "赶时间的本地人",
     "role_en": "a local who is in a bit of a hurry but willing to help",
     "scenario_en": "A street corner in {city}. The learner is lost and needs to get to a famous museum.",
-    "goal_en": "The learner asks for and confirms directions (repeating them back) to the museum."
+    "goal_en": "The learner asks for and confirms directions (repeating them back) to the museum.",
+    "opener_hint_zh": "你在街上拦住一位路人，礼貌地问去博物馆怎么走。",
+    "opener_hint_en": "Stop someone on the street and politely ask how to get to the museum.",
+    "opener_lines": {
+      "us": [
+        "Excuse me, sorry to bother you. How do I get to the museum?",
+        "Hi, I think I'm lost. Is the museum near here?"
+      ],
+      "uk": [
+        "Excuse me, sorry to bother you. How do I get to the museum?",
+        "Hi, I think I'm a bit lost. Is the museum near here?"
+      ]
+    }
   },
   {
     "id": "doctor",
@@ -93,7 +177,19 @@
     "role_zh": "认真的医生",
     "role_en": "a thorough family doctor (a GP in the UK)",
     "scenario_en": "A doctor's office / GP surgery in {city}. The learner has felt unwell for three days.",
-    "goal_en": "The learner describes their symptoms (when it started, how it feels), answers the doctor's questions and understands the advice."
+    "goal_en": "The learner describes their symptoms (when it started, how it feels), answers the doctor's questions and understands the advice.",
+    "opener_hint_zh": "你走进诊室坐下，跟医生说你哪里不舒服。",
+    "opener_hint_en": "Sit down in the doctor's office and say what's wrong.",
+    "opener_lines": {
+      "us": [
+        "Hi, doctor. I've had a sore throat and a fever for two days.",
+        "Hello. I haven't been feeling well. I've got a bad headache."
+      ],
+      "uk": [
+        "Hello, doctor. I've had a sore throat and a temperature for two days.",
+        "Hi. I've been feeling a bit poorly. I've got a terrible headache."
+      ]
+    }
   },
   {
     "id": "party",
@@ -105,7 +201,19 @@
     "role_zh": "健谈的派对客人",
     "role_en": "a friendly, talkative guest at a house party who loves small talk",
     "scenario_en": "A friend's house party in {city}. You and the learner don't know each other.",
-    "goal_en": "The learner keeps a natural small-talk conversation going (work, how they know the host, weekend plans) for several turns and ends it politely."
+    "goal_en": "The learner keeps a natural small-talk conversation going (work, how they know the host, weekend plans) for several turns and ends it politely.",
+    "opener_hint_zh": "你在派对上端着饮料，走向一位陌生人开始聊天。",
+    "opener_hint_en": "At the party, drink in hand, walk up to a stranger and start chatting.",
+    "opener_lines": {
+      "us": [
+        "Hi, I'm Lin. How do you know the host?",
+        "Great party, huh? I don't think we've met. I'm Lin."
+      ],
+      "uk": [
+        "Hiya, I'm Lin. How do you know the host?",
+        "Lovely party, isn't it? I don't think we've met. I'm Lin."
+      ]
+    }
   },
   {
     "id": "rent",
@@ -117,7 +225,19 @@
     "role_zh": "强硬的房东",
     "role_en": "a strict landlord who wants to raise the rent by 15%",
     "scenario_en": "A phone call with the landlord of the learner's apartment/flat in {city}.",
-    "goal_en": "The learner negotiates a smaller increase with reasons (good tenant, market prices, repairs needed) and reaches an agreement."
+    "goal_en": "The learner negotiates a smaller increase with reasons (good tenant, market prices, repairs needed) and reaches an agreement.",
+    "opener_hint_zh": "你给房东打电话，说你收到了涨租通知，想谈一谈。",
+    "opener_hint_en": "Call your landlord: you got the rent increase notice and want to talk about it.",
+    "opener_lines": {
+      "us": [
+        "Hi, I got your notice about the rent increase. Could we talk about it?",
+        "Hello, it's about the new rent. Fifteen percent is a lot for me."
+      ],
+      "uk": [
+        "Hi, I got your letter about the rent going up. Could we have a chat about it?",
+        "Hello, it's about the new rent. Fifteen per cent is quite a lot for me."
+      ]
+    }
   },
   {
     "id": "interview",
@@ -129,7 +249,19 @@
     "role_zh": "专业的面试官",
     "role_en": "a professional, slightly tough hiring manager",
     "scenario_en": "A job interview at a company in {city}. Ask the learner what role they are applying for at the start.",
-    "goal_en": "The learner answers typical interview questions (tell me about yourself, strengths, a challenge they overcame) and asks a question at the end."
+    "goal_en": "The learner answers typical interview questions (tell me about yourself, strengths, a challenge they overcame) and asks a question at the end.",
+    "opener_hint_zh": "你走进面试间，跟面试官打招呼并简单介绍自己。",
+    "opener_hint_en": "Walk into the interview room, greet the interviewer and briefly introduce yourself.",
+    "opener_lines": {
+      "us": [
+        "Hi, nice to meet you. Thanks for having me today.",
+        "Good morning. I'm Lin, and I'm here for the marketing position."
+      ],
+      "uk": [
+        "Hello, lovely to meet you. Thanks for having me today.",
+        "Good morning. I'm Lin, I'm here for the marketing role."
+      ]
+    }
   },
   {
     "id": "free",
@@ -142,6 +274,18 @@
     "role_en": "a friendly native speaker and good conversation partner",
     "scenario_en": "A casual chat in {city}.",
     "goal_en": "",
-    "custom": true
+    "custom": true,
+    "opener_hint_zh": "由你先开口，聊聊你选的话题。",
+    "opener_hint_en": "You start: say something about the topic you picked.",
+    "opener_lines": {
+      "us": [
+        "Hi! Can I tell you about something that happened this week?",
+        "Hey, do you have a minute to chat?"
+      ],
+      "uk": [
+        "Hiya! Can I tell you about something that happened this week?",
+        "Hello, have you got a minute for a chat?"
+      ]
+    }
   }
 ]

@@ -18,6 +18,7 @@ export const DEFAULTS = {
   mode: "immersive", // immersive | assisted
   stepMode: true, // 逐句模式：每句话后看完老师反馈再点“下一句”
   teacherLanguage: "zh", // 老师点评语言：zh（中文）| en（English）
+  opener: "random", // 谁先开口：random（每次随机）| partner（对方）| me（我）
   singleModelMode: false, // 单模型模式：角色和老师由同一个实时模型担任（点评更快，共用一个声音）
 };
 
@@ -183,4 +184,26 @@ function teacherLangInfo(key, accentKey) {
     speechLang: "zh-CN",
     labels: LABELS.zh,
   };
+}
+
+/**
+ * 决定这次练习谁先开口。random 时掷一次，并避免连续 3 次以上相同（记录最近几次结果）。
+ * 返回 "partner" | "me"
+ */
+export function resolveOpener(rand = Math.random) {
+  const pref = read("opener");
+  if (pref === "partner" || pref === "me") return pref;
+  let hist = [];
+  try {
+    hist = JSON.parse(localStorage.getItem(PREFIX + "openerHistory") || "[]");
+    if (!Array.isArray(hist)) hist = [];
+  } catch {}
+  let pick = rand() < 0.5 ? "partner" : "me";
+  const n = hist.length;
+  if (n >= 2 && hist[n - 1] === hist[n - 2] && hist[n - 1] === pick) pick = pick === "me" ? "partner" : "me";
+  hist = [...hist, pick].slice(-6);
+  try {
+    localStorage.setItem(PREFIX + "openerHistory", JSON.stringify(hist));
+  } catch {}
+  return pick;
 }

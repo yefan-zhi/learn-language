@@ -53,6 +53,27 @@ class ViewMissions extends HTMLElement {
             <small class="opt-desc">开启后，每说完一句先看老师点评，点“下一句”后对方才回应，不满意可以“重说”；对话中也可以随时切换。</small>
           </div>
           <div class="opt">
+            <label>谁先开口</label>
+            <div class="opt-switch">
+              <div class="segmented" id="opener-seg">
+                ${[["random", "随机"], ["partner", "对方"], ["me", "我"]]
+                  .map(([v, t]) => `<button data-val="${v}" class="${(getSetting("opener") || "random") === v ? "active" : ""}">${t}</button>`)
+                  .join("")}
+              </div>
+            </div>
+            <small class="opt-desc">“随机”时每次练习随机决定由对方还是你先开口；你先开口时会给出场景提示和参考开场句。</small>
+          </div>
+          <div class="opt">
+            <label>老师语音</label>
+            <div class="opt-switch">
+              <div class="segmented" id="tvoice-seg">
+                <button data-val="on" class="${getSetting("teacherVoiceOn") ? "active" : ""}">🔊 朗读</button>
+                <button data-val="off" class="${getSetting("teacherVoiceOn") ? "" : "active"}">🔇 静音</button>
+              </div>
+            </div>
+            <small class="opt-desc">静音后老师不再自动说话，只显示文字点评；卡片上的“▶ 老师语音”仍可手动播放。对话中也可以随时切换。</small>
+          </div>
+          <div class="opt">
             <label>单模型模式</label>
             <div class="opt-switch">
               <div class="segmented" id="single-seg">
@@ -97,6 +118,20 @@ class ViewMissions extends HTMLElement {
       if (!b) return;
       this.querySelectorAll("#single-seg button").forEach((x) => x.classList.toggle("active", x === b));
       setSetting("singleModelMode", b.dataset.val === "on");
+    });
+
+    this.querySelector("#opener-seg").addEventListener("click", (e) => {
+      const b = e.target.closest("button");
+      if (!b) return;
+      this.querySelectorAll("#opener-seg button").forEach((x) => x.classList.toggle("active", x === b));
+      setSetting("opener", b.dataset.val);
+    });
+
+    this.querySelector("#tvoice-seg").addEventListener("click", (e) => {
+      const b = e.target.closest("button");
+      if (!b) return;
+      this.querySelectorAll("#tvoice-seg button").forEach((x) => x.classList.toggle("active", x === b));
+      setSetting("teacherVoiceOn", b.dataset.val === "on");
     });
 
     this.querySelector("#step-seg").addEventListener("click", (e) => {

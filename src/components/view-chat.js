@@ -15,13 +15,14 @@ import { isModelGoneError, replaceModel } from "../lib/models.js";
 import { listModels, fieldComplete } from "../lib/gemini-rest.js";
 import { AudioStreamer, AudioPlayer } from "../lib/gemini-live/mediaUtils.js";
 import { concatInt16, trimSilence, formatDuration, rms } from "../lib/audio-utils.js";
-import { getSetting, setSetting, ACCENTS, LEVELS, authMode, teacherLang } from "../lib/settings.js";
+import { getSetting, setSetting, ACCENTS, LEVELS, authMode, teacherLang, resolveOpener } from "../lib/settings.js";
 import { startRelaySession, reportUsage } from "../lib/relay.js";
 import { analyzeTurnStream, teacherTTS, nativeTTS, wordTTS, speakBrowser, stopBrowserSpeech, unlockBrowserSpeech } from "../lib/teacher.js";
 import { escapeHtml, feedbackHtml } from "../lib/dom.js";
 import { acquireMic, reacquireMic, watchAudioLifecycle } from "../lib/mic-permission.js";
 import {
-  coachProtocol, giveFeedbackDeclaration, argsToAnalysis, splitCoachText, sampleAtChar, refineSplit,
+  coachProtocol, giveFeedbackDeclaration, resumeRoleplayDeclaration, toolNextHint, cleanCharacterText, argsToAnalysis,
+  COACH_MUTE_SIGNAL, COACH_UNMUTE_SIGNAL,
 } from "../lib/single-model.js";
 
 const SESSION_LIMIT_SEC = 15 * 60; // Live API 纯音频会话上限约 15 分钟
@@ -42,7 +43,7 @@ const NUDGE_FEEDBACK = "[The learner has finished speaking. Please call give_fee
 const REDO_SIGNAL =
   "[redo] The learner wants to try that sentence again. Forget their previous attempt and your feedback on it. Say nothing now; wait for their new attempt.";
 
-function buildSystemInstruction(cfg, { single = false, step = false } = {}) {
+function buildSystemInstruction(cfg, { single = false, step = false, opener = "partner" } = {}) {
   const m = cfg.mission;
   const a = ACCENTS[cfg.accent] || ACCENTS.us;
   const lvl = (LEVELS[cfg.level] || LEVELS.intermediate).en;
@@ -78,9 +79,16 @@ STYLE:
 ${correction}
 - Make the conversation realistic, with small natural complications that fit your role.${stepNote}
 
-START: When you receive the message "[START]", open the conversation in character with one short line.
+${
+    opener === "me"
+      ? `START: The LEARNER speaks first this time. Do NOT say anything until the learner has spoken; then respond in character${single ? " (following the coach protocol below)" : ""}. Never open the conversation yourself.`
+      : `START: When you receive the message "[START]", open the conversation in character with one short line.`
+  }
 ${m.custom ? "" : `MISSION: When the learner has achieved the goal, wrap up naturally in character, then call the complete_mission tool. If the learner keeps talking afterwards, keep chatting.`}`;
-  if (single) text += "\n" + coachProtocol(cfg.accent, teacherLang(undefined, cfg.accent).key, { stepMode: step });
+  if (single)
+    text +=
+      "\n" +
+      coachProtocol(cfg.accent, teacherLang(undefined, cfg.accent).key, { stepMode: step, coachMuted: !getSetting("teacherVoiceOn") });
   return text;
 }
 
@@ -131,6 +139,7 @@ class ViewChat extends HTMLElement {
             <div class="t2">${a.short} · ${(LEVELS[cfg.level] || LEVELS.intermediate).label} · ${cfg.mode === "assisted" ? "辅助" : "沉浸"}${this.single ? " · 单模型" : ""} · 对方：${escapeHtml(cfg.mission.role_zh)}</div>
           </div>
           <button class="chip step-chip ${getSetting("stepMode") ? "on" : ""}" id="step-toggle" title="逐句模式：每说完一句先看老师点评，点“下一句”后对方才回应">逐句</button>
+          ${voiceChipHtml(getSetting("teacherVoiceOn"))}
           <div class="timer" id="timer">0:00</div>
         </div>
 
@@ -165,7 +174,6 @@ class ViewChat extends HTMLElement {
         <div class="chat-bottom">
           <div class="viz-row small"><audio-visualizer id="user-viz"></audio-visualizer></div>
           <div class="controls">
-            <button class="chip ${getSetting("teacherVoiceOn") ? "on" : ""} ${this.single ? "hidden" : ""}" id="voice-toggle" title="老师语音点评">🔊 老师语音</button>
             <button class="cta-btn redo-btn hidden" id="redo-btn" title="丢掉这句的录音和点评，重新说">↺ 重说</button>
             <button class="cta-btn next-btn hidden" id="next-btn" disabled>老师点评中…</button>
             <button class="cta-btn" id="main-btn">开始对话</button>
@@ -179,12 +187,7 @@ class ViewChat extends HTMLElement {
     this.$("back").onclick = () => this.onBack();
     this.$("main-btn").onclick = () => this.onMainBtn();
     this.$("skip-teacher").onclick = () => this.skipTeacher();
-    this.$("voice-toggle").onclick = () => {
-      const on = !getSetting("teacherVoiceOn");
-      setSetting("teacherVoiceOn", on);
-      this.$("voice-toggle").classList.toggle("on", on);
-      if (!on) this.skipTeacher(true);
-    };
+    this.$("voice-toggle").onclick = () => this.onVoiceToggle();
     this.$("transcript").addEventListener("click", (e) => this.onTranscriptClick(e));
     this.$("next-btn").onclick = () => this.onNext();
     this.$("step-skip").onclick = () => this.onSkipWait();
@@ -242,9 +245,6 @@ class ViewChat extends HTMLElement {
     redo.classList.add("hidden");
     done.classList.add("hidden");
     skip.classList.add("hidden");
-    // 窄屏：出现“重说/下一句”时收起老师语音开关
-    const voiceChip = this.$("voice-toggle");
-    if (voiceChip && !this.single) voiceChip.classList.toggle("hidden", this.stepPhase === "review" || !!this.respondFailed);
 
     if (this.reconnecting) {
       next.classList.remove("hidden");
@@ -702,6 +702,8 @@ class ViewChat extends HTMLElement {
     this.lastFinalizedTurn = null;
     this.teacherQueue = [];
     this.teacherSpeaking = false;
+    this.teacherPlayToken = 0;
+    this.pendingCoachSignal = null;
     this.holdStartedAt = 0;
     this.micHeld = false;
     this.stepTurn = null;
@@ -751,6 +753,10 @@ class ViewChat extends HTMLElement {
         this.sessionLimitSec = Math.min(SESSION_LIMIT_SEC, relay.grantedMinutes * 60);
       }
 
+      // 谁先开口：每次练习只决定一次（重连时不再重新决定）
+      if (!this.session.opener) this.session.opener = resolveOpener();
+      const meFirst = this.session.opener === "me";
+
       // 连接；如果 Live 模型已停用，自动换成推荐模型再试一次
       const res = await this.connectLive(relay);
       relay = res.relay;
@@ -758,24 +764,30 @@ class ViewChat extends HTMLElement {
       this.state = "active";
       this.session.startedAt = Date.now();
       this.connectedAt = this.session.startedAt;
-      live.sendText("[START]");
-      if (this.stepOn()) {
-        // 对方先开口；说完后开始录第一句
-        this.replyTurn = null;
-        this.setPhase("responding");
-        this.modelOutputSince = false;
-        this.startWatchdog("reply");
+      if (meFirst) {
+        // 我先开口：不发开场提示；逐句模式直接开始本地录第一句
+        if (this.stepOn()) this.setPhase("listen");
+      } else {
+        live.sendText("[START]");
+        if (this.stepOn()) {
+          // 对方先开口；说完后开始录第一句
+          this.replyTurn = null;
+          this.setPhase("responding");
+          this.modelOutputSince = false;
+          this.startWatchdog("reply");
+        }
       }
 
       btn.disabled = false;
       btn.textContent = this.stepOn() ? "结束" : "结束并查看总结";
       btn.classList.add("active");
       const unl = relay && relay.grantedMinutes && relay.grantedMinutes < 15 ? `（本次最多 ${relay.grantedMinutes} 分钟）` : "";
-      this.setStatus(`已连接，对方马上开口…${unl}`, "var(--color-success)");
+      this.setStatus(meFirst ? `已连接，这次由你先开口${unl}` : `已连接，对方马上开口…${unl}`, "var(--color-success)");
       this._onPageHide = () => this.finishRelay();
       window.addEventListener("pagehide", this._onPageHide);
       const hint = this.$("empty-hint");
       if (hint) hint.remove();
+      if (meFirst) this.showOpenerBox();
 
       this.timer = setInterval(() => this.tick(), 300);
     } catch (err) {
@@ -798,7 +810,7 @@ class ViewChat extends HTMLElement {
   buildLive(relay, resumeContext) {
     const cfg = this._cfg;
     const step = this.flow === "step";
-    let systemInstruction = buildSystemInstruction(cfg, { single: this.single, step });
+    let systemInstruction = buildSystemInstruction(cfg, { single: this.single, step, opener: this.session.opener || "partner" });
     if (resumeContext) {
       systemInstruction += `
 
@@ -819,7 +831,10 @@ Continue seamlessly from exactly this point. Do NOT greet again, do NOT restart 
         },
       });
     }
-    if (this.single) tools.push(giveFeedbackDeclaration(cfg.accent, teacherLang(undefined, cfg.accent).key, model));
+    if (this.single) {
+      tools.push(giveFeedbackDeclaration(cfg.accent, teacherLang(undefined, cfg.accent).key, model));
+      if (!step) tools.push(resumeRoleplayDeclaration(model));
+    }
     const live = new LiveSession({
       apiKey: relay ? undefined : getSetting("apiKey"),
       url: relay ? relay.wsUrl : undefined,
@@ -835,7 +850,7 @@ Continue seamlessly from exactly this point. Do NOT greet again, do NOT restart 
       this.onModelOutput();
       if (this.ignoreModelTurn) return;
       this.recordModelAudio(pcm);
-      this.player.play(pcm);
+      this.routeModelAudio(pcm);
     };
     live.onOutputTranscript = (t) => {
       if (this.live !== live) return;
@@ -1089,6 +1104,7 @@ Continue seamlessly from exactly this point. Do NOT greet again, do NOT restart 
     this.ignoreModelTurn = false;
     if (wasSpeaking) this.finishModelTurn(interrupted, ignored);
     this.closeModelEntry();
+    this.flushCoachSignal();
 
     if (this.stepOn()) {
       this.asrTarget = null;
@@ -1511,6 +1527,7 @@ Continue seamlessly from exactly this point. Do NOT greet again, do NOT restart 
   }
 
   async playTeacher(turn) {
+    const token = ++this.teacherPlayToken;
     this.teacherSpeaking = true;
     this.setHold(true, "🧑‍🏫 老师点评中，听完再继续说…");
     this.updateStepUI();
@@ -1535,6 +1552,7 @@ Continue seamlessly from exactly this point. Do NOT greet again, do NOT restart 
     } catch (e) {
       console.warn(e);
     }
+    if (token !== this.teacherPlayToken) return; // 播放中被静音：状态已经由 muteTeacher 清理
     card?.classList.remove("speaking");
     if (turn.voice !== "skipped") turn.voice = "played";
     if (this.teacherQueue[0] === turn) this.teacherQueue.shift();
@@ -1543,6 +1561,117 @@ Continue seamlessly from exactly this point. Do NOT greet again, do NOT restart 
     // 实时流程：新的一句从这里开始录
     if (!this.stepOn()) this.userChunks = [];
     this.pumpTeacher();
+  }
+
+  /** “这次由你先开口”提示框：场景提示 + 参考开场句（点击收听） */
+  showOpenerBox() {
+    const cfg = this._cfg;
+    const m = cfg.mission;
+    const en = this.session.teacherLang === "en";
+    let hint = en ? m.opener_hint_en : m.opener_hint_zh;
+    if (m.custom && cfg.topic) hint = en ? `You start: say something about "${cfg.topic}".` : `由你先开口，聊聊“${cfg.topic}”。`;
+    const lines = (m.opener_lines && (m.opener_lines[cfg.accent] || m.opener_lines.us)) || [];
+    const box = document.createElement("div");
+    box.className = "opener-box";
+    box.dataset.turn = "opener";
+    box.innerHTML = `
+      <div class="ob-title">👉 ${en ? "You start this time" : "这次由你先开口"}</div>
+      ${hint ? `<div class="ob-hint">${escapeHtml(hint)}</div>` : ""}
+      ${
+        lines.length
+          ? `<div class="ob-sub">${en ? "You could say:" : "可以这样开头："}</div>` +
+            lines
+              .slice(0, 2)
+              .map(
+                (l, i) =>
+                  `<div class="ob-line"><button class="play-mini" data-act="opener" data-word="${i}" data-line="${escapeHtml(l)}" aria-label="${en ? "Listen" : "收听"}">🔊</button><span>${escapeHtml(l)}</span></div>`
+              )
+              .join("")
+          : ""
+      }`;
+    this.$("transcript")?.prepend(box);
+  }
+
+  // ======================================================================
+  // 老师静音开关
+  // ======================================================================
+  syncVoiceChip() {
+    const chip = this.$("voice-toggle");
+    if (!chip) return;
+    const on = !!getSetting("teacherVoiceOn");
+    chip.outerHTML = voiceChipHtml(on);
+    this.$("voice-toggle").onclick = () => this.onVoiceToggle();
+  }
+
+  onVoiceToggle() {
+    const on = !getSetting("teacherVoiceOn");
+    setSetting("teacherVoiceOn", on);
+    this.syncVoiceChip();
+    if (on) {
+      this.setStatus(this.single ? "🔊 老师语音已开启" : "🔊 老师语音已开启（从下一句开始）", "var(--color-accent-primary)");
+    } else {
+      this.muteTeacher();
+      this.setStatus("🔇 老师已静音：只显示文字点评，卡片上仍可手动播放", "var(--color-text-sub)");
+    }
+    if (this.single) this.queueCoachSignal(on);
+  }
+
+  /** 静音：立刻停掉正在播的老师语音，清空待播队列 */
+  muteTeacher() {
+    this.teacherPlayToken++;
+    if (this.teacherSpeaking) {
+      if (this.player) this.player.stopClip();
+      stopBrowserSpeech();
+    }
+    for (const t of this.session.turns) {
+      if (["waiting", "ready", "ready-browser"].includes(t.voice)) {
+        t.voice = "skipped";
+        t.voiceMuted = true;
+      }
+    }
+    this.teacherQueue = [];
+    this.teacherSpeaking = false;
+    this.querySelectorAll(".turn.speaking, .teacher-card.speaking").forEach((el) => el.classList.remove("speaking"));
+    this.holdStartedAt = 0;
+    // 单模型：这一轮还在老师那段：掐掉已经在播的声音，后面的老师音频不再播放
+    if (this.inCoachPart() && this.player && this.player.streaming) this.player.interrupt();
+    this.setHold(false);
+    if (!this.stepOn()) this.userChunks = [];
+    this.updateStepUI();
+    this.pumpTeacher();
+  }
+
+  /** 单模型：把静音/取消静音告诉模型（只追加上下文，不触发回应；模型正在说话时等这轮结束再发） */
+  queueCoachSignal(on) {
+    this.pendingCoachSignal = on ? COACH_UNMUTE_SIGNAL : COACH_MUTE_SIGNAL;
+    if (!this.modelSpeaking) this.flushCoachSignal();
+  }
+
+  flushCoachSignal() {
+    if (!this.pendingCoachSignal) return;
+    if (!this.live || this.liveDown || this.state !== "active") return; // 重连时提示词里已经带上当前状态
+    const sig = this.pendingCoachSignal;
+    this.pendingCoachSignal = null;
+    try {
+      this.live.sendText(sig, false);
+    } catch (e) {
+      console.warn("发送老师静音提示失败", e);
+    }
+  }
+
+  /** 当前这一轮是不是正处在老师那段 */
+  inCoachPart(mt = this.mt) {
+    return !!(this.single && mt && (mt.kind === "coach" || (mt.kind === "mixed" && mt.boundarySample < 0)));
+  }
+
+  /** 单模型 + 老师静音：老师那段的声音不播放（按工具调用/轮次分界，实时判断） */
+  routeModelAudio(pcm) {
+    const mt = this.mt;
+    if (this.inCoachPart(mt) && !getSetting("teacherVoiceOn")) {
+      mt.coachMuted = true;
+      return;
+    }
+    this.player.play(pcm);
   }
 
   skipTeacher(all = false) {
@@ -1577,8 +1706,14 @@ Continue seamlessly from exactly this point. Do NOT greet again, do NOT restart 
         this.$("mission-banner")?.classList.remove("hidden");
       } else if (c.name === "give_feedback") {
         this.onGiveFeedback(c.args || {});
+      } else if (c.name === "resume_roleplay") {
+        this.onResumeRoleplay();
       }
-      const response = c.name === "give_feedback" ? { ok: true } : { result: "ok" };
+      const hintOpts = { stepMode: this.stepOn(), coachMuted: !getSetting("teacherVoiceOn") };
+      const response =
+        c.name === "give_feedback" || c.name === "resume_roleplay"
+          ? { ok: true, next: toolNextHint(c.name, hintOpts) }
+          : { result: "ok" };
       if (this.liveToolNonBlocking) response.scheduling = "SILENT";
       responses.push({ id: c.id, name: c.name, response });
     }
@@ -1608,9 +1743,16 @@ Continue seamlessly from exactly this point. Do NOT greet again, do NOT restart 
       const entry = this.session.transcript.find((e) => e.turnId === turn.id);
       if (entry) entry.text = a.transcript;
     }
-    if (this.mt) {
-      this.mt.feedbackTurn = turn;
-      if (!this.mt.pendingTurn) this.mt.pendingTurn = turn;
+    const mt = this.mt;
+    if (mt) {
+      mt.feedbackTurn = turn;
+      if (!mt.pendingTurn) mt.pendingTurn = turn;
+      // 实时：这一轮还没有任何输出就来了点评 → 之后到 resume_roleplay 为止都算老师
+      if (mt.kind === "character" && !this.stepOn() && !mt.full && !mt.samples) mt.kind = "mixed";
+      if (!mt.attachTurn || mt.attachTurn !== turn) {
+        mt.attachTurn = turn;
+        mt.baseTeacher = turn.liveTeacher || "";
+      }
     }
     if (turn.liveTeacher) a.spoken_feedback_zh = turn.liveTeacher;
     this.logTiming(turn);
@@ -1618,6 +1760,17 @@ Continue seamlessly from exactly this point. Do NOT greet again, do NOT restart 
     this.emit();
     this.updateStepUI();
     this.revealStepCard(turn);
+  }
+
+  /** 实时单模型：模型调用 resume_roleplay = 老师说完、角色开始。记下文字和音频的分界 */
+  onResumeRoleplay() {
+    if (!this.single || this.ignoreModelTurn) return;
+    this.onModelOutput();
+    const mt = this.mt;
+    if (!mt || mt.kind !== "mixed" || mt.boundarySample >= 0) return;
+    mt.boundaryChar = mt.full.length;
+    mt.boundarySample = mt.samples;
+    this.renderModelText(mt, false);
   }
 
   markMissing(turn, why) {
@@ -1647,9 +1800,7 @@ Continue seamlessly from exactly this point. Do NOT greet again, do NOT restart 
     const entry = { role: "model", text: "" };
     this.session.transcript.push(entry);
     this.currentModelEntry = entry;
-    // 单模型：这一轮是否在等某句的点评
-    const fb = this.single && this.singleTurn && !this.singleTurn.singleDone ? this.singleTurn : null;
-    this.mt = { chunks: [], audio: [], samples: 0, full: "", firstAudioAt: 0, feedbackTurn: fb, pendingTurn: fb };
+    this.mt = this.newModelTurnState();
     const el = document.createElement("div");
     el.className = "bubble model temp";
     el.innerHTML = `<span class="who">${escapeHtml(this._cfg.mission.role_zh)}</span><span class="txt"></span>`;
@@ -1658,66 +1809,96 @@ Continue seamlessly from exactly this point. Do NOT greet again, do NOT restart 
     this.scrollDown();
   }
 
+  /**
+   * 单模型：这一轮输出归谁？
+   *  - 逐句：发出句子之后、[continue] 之前（review 阶段）的输出全部算老师；之后的全部算角色
+   *  - 实时：有待点评的句子时，resume_roleplay 之前算老师、之后算角色（mixed）
+   */
+  newModelTurnState() {
+    const base = { chunks: [], audio: [], samples: 0, full: "", firstAudioAt: 0, boundaryChar: -1, boundarySample: -1 };
+    if (!this.single) return { ...base, kind: "character", pendingTurn: null };
+    let kind = "character";
+    let turn = null;
+    if (this.stepOn()) {
+      if (this.stepPhase === "review" && this.stepTurn) {
+        kind = "coach";
+        turn = this.stepTurn;
+      }
+    } else if (this.singleTurn && !this.singleTurn.singleDone) {
+      kind = "mixed";
+      turn = this.singleTurn;
+    }
+    // 角色文字里清理出来的中文点评挂到哪一句上
+    const attach = turn || (this.stepOn() ? this.replyTurn : this.lastFinalizedTurn) || null;
+    return { ...base, kind, pendingTurn: turn, feedbackTurn: turn, attachTurn: attach, baseTeacher: attach?.liveTeacher || "" };
+  }
+
   appendModelText(t) {
     if (!this.currentModelEntry) this.openModelEntry();
     const mt = this.mt;
-    const before = mt.full;
-    mt.full = joinText(before, t);
-    mt.chunks.push({ start: mt.full.length - t.replace(/^\s+/, "").length, pos: mt.samples });
-    if (mt.pendingTurn) {
-      const sp = splitCoachText(mt.full, this.session.teacherLang, false);
-      this.applySplit(mt, sp, false);
-    } else {
-      this.currentModelEntry.text = mt.full;
-      this.currentModelEl.querySelector(".txt").textContent = mt.full;
-    }
+    mt.full = joinText(mt.full, t);
+    // 转写一般比音频晚：resume_roleplay 之后、角色的音频还没来之前到的文字，仍然是老师那段的
+    if (mt.kind === "mixed" && mt.boundarySample >= 0 && mt.samples === mt.boundarySample) mt.boundaryChar = mt.full.length;
+    this.renderModelText(mt, false);
     this.scrollDown();
   }
 
-  /** 把拆分结果显示出来：老师部分进卡片，角色部分进气泡 */
-  applySplit(mt, sp, final) {
-    const turn = mt.pendingTurn;
-    this.currentModelEntry.text = sp.character;
-    if (this.currentModelEl) this.currentModelEl.querySelector(".txt").textContent = sp.character;
-    if (turn && sp.found) {
-      turn.liveTeacher = sp.teacher;
-      if (turn.analysis && sp.teacher) turn.analysis.spoken_feedback_zh = sp.teacher;
-      if (!turn.t?.voiceStart && mt.firstAudioAt && turn.t) turn.t.voiceStart = mt.firstAudioAt;
-      this.scheduleRender(turn);
+  /** 按分界把这一轮文字分成老师/角色，分别显示到卡片和气泡 */
+  renderModelText(mt, final) {
+    let coach = "";
+    let character = "";
+    if (mt.kind === "coach") coach = mt.full;
+    else if (mt.kind === "character") character = mt.full;
+    else if (mt.boundaryChar < 0) coach = mt.full;
+    else {
+      coach = mt.full.slice(0, mt.boundaryChar);
+      character = mt.full.slice(mt.boundaryChar);
     }
-    if (final && turn && sp.found && sp.characterStart >= 0 && sp.character && this.stepOn()) {
-      // 逐句模式要求点评后停下，但模型直接接着说了角色台词：照常显示
-      turn.singleNoStop = true;
-      console.warn("[单模型] 模型点评后没有停下，直接说了角色台词");
+    coach = coach.replace(/^\s*(?:老\s*师|教\s*练|coach|teacher)\s*[：:，,。.]?\s*/i, "");
+    let moved = "";
+    if (this.single && character) {
+      const c = cleanCharacterText(character, this.session.teacherLang);
+      character = c.character;
+      if (mt.attachTurn) moved = c.moved;
+      else if (c.moved) character = [c.moved, character].filter(Boolean).join(" ");
+    }
+    if (this.currentModelEntry) this.currentModelEntry.text = character.trim();
+    if (this.currentModelEl) this.currentModelEl.querySelector(".txt").textContent = character.trim();
+    const turn = mt.attachTurn;
+    const extra = [coach.trim(), moved].filter(Boolean).join(" ");
+    if (turn && (extra || mt.kind !== "character")) {
+      turn.liveTeacher = [mt.baseTeacher, extra].filter(Boolean).join(" ").trim();
+      if (turn.analysis && turn.liveTeacher) turn.analysis.spoken_feedback_zh = turn.liveTeacher;
+      if (coach && !turn.t?.voiceStart && mt.firstAudioAt && turn.t) turn.t.voiceStart = mt.firstAudioAt;
+      this.scheduleRender(turn);
     }
   }
 
-  /** 一轮模型输出结束：单模型模式下切出老师那段音频、检查是否漏了点评 */
+  /** 这一轮里属于老师的音频（不含角色） */
+  coachAudioOf(mt) {
+    if (mt.kind === "character") return null;
+    const pcm = concatInt16(mt.audio);
+    return mt.kind === "mixed" && mt.boundarySample >= 0 ? pcm.slice(0, mt.boundarySample) : pcm;
+  }
+
+  /** 一轮模型输出结束：存下老师那段音频、检查是否漏了点评 */
   finishModelTurn(interrupted, ignored = false) {
     const mt = this.mt;
     this.mt = null;
     if (!mt || ignored) return;
+    if (this.currentModelEntry) this.renderModelText(mt, true);
     const turn = mt.pendingTurn;
     if (!turn) return;
-    const sp = splitCoachText(mt.full, this.session.teacherLang, true);
-    this.applySplit(mt, sp, true);
-    const pcm = concatInt16(mt.audio);
-    if (pcm.length && sp.found) {
-      let start = 0;
-      if (sp.teacherStart > 0) start = refineSplit(pcm, sampleAtChar(mt.chunks, sp.teacherStart));
-      let end = pcm.length;
-      if (sp.characterStart >= 0 && sp.character) end = refineSplit(pcm, sampleAtChar(mt.chunks, sp.characterStart));
-      if (end - start > 24000 * 0.3) turn.teacherPcm = pcm.slice(start, end);
-      else turn.teacherPcm = pcm;
-      turn.teacherWhole = !(end - start > 24000 * 0.3) || (sp.characterStart < 0 && !!sp.character);
-    } else if (pcm.length && turn.analysis) {
-      // 没找到“老师：”标记：只能回放整轮音频
-      turn.teacherPcm = pcm;
-      turn.teacherWhole = true;
+    const coachPcm = this.coachAudioOf(mt);
+    if (coachPcm && coachPcm.length > 24000 * 0.1) {
+      // 同一句的第二轮老师输出（比如逐句模式里模型又补了一句）：接在后面
+      turn.teacherPcm = turn.teacherPcm && turn.singleDone ? concatInt16([turn.teacherPcm, coachPcm]) : coachPcm;
+      turn.teacherWhole = false;
     }
+    if (mt.kind === "mixed" && mt.boundarySample < 0 && !interrupted) turn.noRoleplay = true;
     if (turn.analysis && turn.liveTeacher) turn.analysis.spoken_feedback_zh = turn.liveTeacher;
     if (!turn.analysis && turn.status !== "missing") {
-      this.markMissing(turn, interrupted ? "被打断" : sp.found ? "模型只给了口头提示" : "模型没有调用点评工具");
+      this.markMissing(turn, interrupted ? "被打断" : turn.liveTeacher ? "模型只给了口头提示" : "模型没有调用点评工具");
     }
     this.afterDrain(() => {
       turn.singleDone = true;
@@ -1795,6 +1976,7 @@ Continue seamlessly from exactly this point. Do NOT greet again, do NOT restart 
       <div class="teacher-card ${wrap.classList.contains("speaking") ? "speaking" : ""}">
         <div class="tc-title">🧑‍🏫 ${TL.key === "en" ? "Coach" : "老师点评"}${turn.single ? `<span class="tc-badge">单模型</span>` : ""}</div>
         ${fb}
+        ${turn.noRoleplay ? `<div class="fb-muted">（角色未回应）</div>` : ""}
         <div class="tc-actions">
           <button class="play-btn" data-act="mine" ${turn.pcm ? "" : "disabled"}>▶ 我的录音</button>
           ${canTeacher ? `<button class="play-btn teacher" data-act="teacher">${teacherLabel}</button>` : ""}
@@ -1902,6 +2084,12 @@ Continue seamlessly from exactly this point. Do NOT greet again, do NOT restart 
   async onTranscriptClick(e) {
     const btn = e.target.closest("[data-act]");
     if (!btn || btn.disabled) return;
+    if (btn.dataset.act === "opener") {
+      const line = btn.dataset.line || "";
+      const lang = (ACCENTS[this._cfg.accent] || ACCENTS.us).bcp47;
+      this.playOnCard({ id: "opener" }, btn, async () => ({ pcm: await nativeTTS(line, this._cfg.accent), rate: 24000 }), () => speakBrowser(line, lang));
+      return;
+    }
     const wrap = btn.closest("[data-turn]");
     const turn = this.session.turns.find((t) => t.id === wrap?.dataset.turn);
     if (!turn) return;
@@ -1939,6 +2127,12 @@ Continue seamlessly from exactly this point. Do NOT greet again, do NOT restart 
       );
     }
   }
+}
+
+function voiceChipHtml(on) {
+  return on
+    ? `<button class="chip voice-chip on" id="voice-toggle" aria-pressed="false" title="老师语音：开（点一下静音）">🔊 老师</button>`
+    : `<button class="chip voice-chip muted" id="voice-toggle" aria-pressed="true" title="老师已静音（点一下恢复语音）">🔇 <span class="vc-word">老师</span>已静音</button>`;
 }
 
 function sleep(ms) {
