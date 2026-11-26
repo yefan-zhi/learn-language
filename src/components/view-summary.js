@@ -94,7 +94,7 @@ class ViewSummary extends HTMLElement {
   }
 
   allAnalyzed() {
-    return this._s.turns.every((t) => t.analysis || t.status === "error");
+    return this._s.turns.every((t) => t.analysis || t.status === "error" || t.status === "missing");
   }
 
   maybeSummarize() {
@@ -165,7 +165,7 @@ class ViewSummary extends HTMLElement {
       el.innerHTML = `<p>总结生成失败：${escapeHtml(this.summaryError)}</p><button class="small-btn" id="retry-sum">重试</button>`;
       el.querySelector("#retry-sum").onclick = () => this.doSummarize();
     } else {
-      const done = s.turns.filter((t) => t.analysis || t.status === "error").length;
+      const done = s.turns.filter((t) => t.analysis || t.status === "error" || t.status === "missing").length;
       el.innerHTML = `<div class="fb-loading"><span class="dots"></span> 老师正在写总结…（已点评 ${done}/${s.turns.length} 句）</div>`;
     }
   }
@@ -182,7 +182,9 @@ class ViewSummary extends HTMLElement {
       .map((t, i) => {
         const a = t.analysis;
         const body =
-          t.status === "error"
+          t.status === "missing"
+            ? `<div class="fb-muted">${escapeHtml(t.error || "本句未点评")}</div>`
+            : t.status === "error"
             ? `<div class="fb-muted">点评失败：${escapeHtml(t.error || "")}</div>`
             : a
             ? feedbackHtml(a, { compact: true })

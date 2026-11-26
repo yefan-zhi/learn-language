@@ -178,12 +178,12 @@ export class LiveSession {
     });
   }
 
-  /** 发送一条文本（作为用户回合） */
-  sendText(text) {
+  /** 发送一条文本（作为用户回合）；turnComplete=false 时只追加上下文、不触发回复 */
+  sendText(text, turnComplete = true) {
     this._sendJSON({
       clientContent: {
         turns: [{ role: "user", parts: [{ text }] }],
-        turnComplete: true,
+        turnComplete,
       },
     });
   }

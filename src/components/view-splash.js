@@ -24,6 +24,12 @@ class ViewSplash extends HTMLElement {
         <button class="cta-btn" id="start">开始练习</button>
         <p class="hint" id="key-hint"></p>
         ${detectBrowser().isIPhone ? `<p class="hint">🎧 建议戴耳机，效果更好</p>` : ""}
+        <p class="credit">
+          Developed based on
+          <a href="https://github.com/ZackAkil/immersive-language-learning-with-live-api" target="_blank" rel="noopener">ZackAkil/immersive-language-learning-with-live-api</a>
+          (Apache-2.0) ·
+          <a href="https://github.com/yefan-zhi/learn-language" target="_blank" rel="noopener">本项目源码</a>
+        </p>
       </div>
     `;
     const hint = this.querySelector("#key-hint");

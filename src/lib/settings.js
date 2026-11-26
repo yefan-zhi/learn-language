@@ -18,6 +18,7 @@ export const DEFAULTS = {
   mode: "immersive", // immersive | assisted
   stepMode: true, // 逐句模式：每句话后看完老师反馈再点“下一句”
   teacherLanguage: "zh", // 老师点评语言：zh（中文）| en（English）
+  singleModelMode: false, // 单模型模式：角色和老师由同一个实时模型担任（点评更快，共用一个声音）
 };
 
 export const LIVE_VOICES = ["Puck", "Charon", "Kore", "Fenrir", "Aoede", "Leda", "Orus", "Zephyr"];
@@ -147,6 +148,21 @@ export const TEACHER_LANGS = {
  *  - speechLang：朗读点评用的 BCP-47 语言（zh-CN / en-US / en-GB）
  */
 export function teacherLang(key, accentKey) {
+  return teacherLangInfo(key, accentKey);
+}
+
+/**
+ * 单模型模式下老师的口头标记：开头的切换提示语 + 结尾回到角色的固定句子
+ * （客户端靠它们把模型一轮输出拆成“老师”和“角色”两部分）
+ */
+export function coachMarkers(key) {
+  const k = (key ?? read("teacherLanguage")) === "en" ? "en" : "zh";
+  return k === "en"
+    ? { start: "Coach:", end: "Okay, back to the conversation." }
+    : { start: "老师：", end: "好，我们继续。" };
+}
+
+function teacherLangInfo(key, accentKey) {
   const k = (key ?? read("teacherLanguage")) === "en" ? "en" : "zh";
   const acc = ACCENTS[accentKey ?? read("accent")] || ACCENTS.us;
   if (k === "en") {

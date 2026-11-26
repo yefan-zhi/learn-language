@@ -1,5 +1,13 @@
 /**
- * 对话页：角色扮演（Gemini Live）+ 第三方中文老师点评
+ * 对话页：角色扮演（Gemini Live）+ 老师点评
+ *
+ * 两种流程：
+ *  - 实时流程（逐句关闭）：麦克风实时上传给 Live，对方说完就回应；老师在旁边点评。
+ *  - 逐句流程（逐句开启）：本地录下一句 → 老师点评 → 点“下一句”才把这句发给对方 → 对方回应 → 再录下一句。
+ *
+ * 两种老师：
+ *  - 独立老师（默认）：另一个文本模型听录音给点评，设备语音 / Gemini TTS 朗读。
+ *  - 单模型模式：同一个 Live 模型先调用 give_feedback 并口头点评，再（或等“[continue]”后）以角色身份回应。
  */
 import "./audio-visualizer.js";
 import { LiveSession } from "../lib/gemini-live/geminilive.js";
@@ -12,15 +20,29 @@ import { startRelaySession, reportUsage } from "../lib/relay.js";
 import { analyzeTurnStream, teacherTTS, nativeTTS, wordTTS, speakBrowser, stopBrowserSpeech, unlockBrowserSpeech } from "../lib/teacher.js";
 import { escapeHtml, feedbackHtml } from "../lib/dom.js";
 import { acquireMic, reacquireMic, watchAudioLifecycle } from "../lib/mic-permission.js";
+import {
+  coachProtocol, giveFeedbackDeclaration, argsToAnalysis, splitCoachText, sampleAtChar, refineSplit,
+} from "../lib/single-model.js";
 
 const SESSION_LIMIT_SEC = 15 * 60; // Live API 纯音频会话上限约 15 分钟
 const RING_SAMPLES = 16000 * 3;
 const TEACHER_WAIT_MS = 12000;
-// 本地 VAD：说话至少 0.3 秒后，静音 0.7 秒就认为这句说完，提前开始老师分析
+// 本地 VAD：说话至少 0.3 秒后，静音 0.7 秒就认为这句说完
 const VAD_MIN_VOICE = 16000 * 0.3;
 const VAD_END_SILENCE = 16000 * 0.7;
+const STEP_MAX_SENTENCE = 16000 * 25; // 逐句模式一句最长 25 秒
+const SEND_CHUNK = 1600; // 补发音频：每块 100ms
+const SEND_INTERVAL_MS = 25; // 比实时快约 4 倍
+const SILENCE_TAIL_SEC = 1.2; // 补发后追加的静音，让服务端 VAD 判定这句结束
+const RESPONSE_WATCHDOG_MS = 8000;
 
-function buildSystemInstruction(cfg) {
+export const CONTINUE_SIGNAL = "[continue]";
+const NUDGE_REPLY = "[The learner has finished speaking. Please reply in character now.]";
+const NUDGE_FEEDBACK = "[The learner has finished speaking. Please call give_feedback and give your short coach comment now, then stop and wait.]";
+const REDO_SIGNAL =
+  "[redo] The learner wants to try that sentence again. Forget their previous attempt and your feedback on it. Say nothing now; wait for their new attempt.";
+
+function buildSystemInstruction(cfg, { single = false, step = false } = {}) {
   const m = cfg.mission;
   const a = ACCENTS[cfg.accent] || ACCENTS.us;
   const lvl = (LEVELS[cfg.level] || LEVELS.intermediate).en;
@@ -29,11 +51,19 @@ function buildSystemInstruction(cfg) {
   const goal = m.custom
     ? `Topic: ${cfg.topic ? `"${cfg.topic}"` : "anything the learner wants to talk about; if they don't pick one, suggest an everyday topic"}.`
     : `The learner's goal: ${m.goal_en}`;
+  const who = single ? "The CHARACTER should s" : "- S";
   const lang =
     cfg.mode === "assisted"
-      ? `- Speak English. If the learner is clearly stuck, speaks Chinese, or asks how to say something, you may give ONE very short hint (say the English phrase they need; at most a few words of Chinese), then carry on in English, in character.`
-      : `- Speak English only. Never speak Chinese, even if the learner does. If the learner uses Chinese, react in character as someone who doesn't understand it and encourage them to try in English (you may offer a simple English phrase they could use).`;
-  return `You are role-playing as ${m.role_en} in a spoken English conversation practice.
+      ? `${single ? "- " : ""}${who}peak English. If the learner is clearly stuck, speaks Chinese, or asks how to say something, ${single ? "the character" : "you"} may give ONE very short hint (say the English phrase they need; at most a few words of Chinese), then carry on in English, in character.`
+      : `${single ? "- " : ""}${who}peak English only. ${single ? "The character must never" : "Never"} speak Chinese, even if the learner does. If the learner uses Chinese, react in character as someone who doesn't understand it and encourage them to try in English (you may offer a simple English phrase they could use).`;
+  const correction = single
+    ? `- The CHARACTER does not correct the learner's grammar or pronunciation and gives no language lessons: only the COACH (see below) does that. If the character genuinely can't understand them, it asks them to repeat, as a real person would.`
+    : `- Do NOT correct the learner's grammar or pronunciation and do not give language lessons: a separate teacher gives feedback. Just react naturally as a real person would; if you genuinely can't understand them, ask them to repeat or clarify, as a real person would.`;
+  const stepNote =
+    step && !single
+      ? `\n- The app sends each learner sentence to you only after they have finished it, sometimes followed by a short silence. Reply to each one normally.`
+      : "";
+  let text = `You are role-playing as ${m.role_en} in a spoken English conversation practice.
 Setting: ${scenario}
 The learner is a native Mandarin Chinese speaker practising ${a.en}. Learner level: ${lvl}.
 ${goal}
@@ -45,11 +75,13 @@ ${lang}
 STYLE:
 - Stay fully in character as a real person. Never mention being an AI or a language tutor.
 - Keep each reply short: 1-2 sentences (about 30 words at most), then give the learner room to speak. Ask questions to keep them talking.
-- Do NOT correct the learner's grammar or pronunciation and do not give language lessons: a separate teacher gives feedback. Just react naturally as a real person would; if you genuinely can't understand them, ask them to repeat or clarify, as a real person would.
-- Make the conversation realistic, with small natural complications that fit your role.
+${correction}
+- Make the conversation realistic, with small natural complications that fit your role.${stepNote}
 
 START: When you receive the message "[START]", open the conversation in character with one short line.
 ${m.custom ? "" : `MISSION: When the learner has achieved the goal, wrap up naturally in character, then call the complete_mission tool. If the learner keeps talking afterwards, keep chatting.`}`;
+  if (single) text += "\n" + coachProtocol(cfg.accent, teacherLang(undefined, cfg.accent).key, { stepMode: step });
+  return text;
 }
 
 class ViewChat extends HTMLElement {
@@ -65,6 +97,9 @@ class ViewChat extends HTMLElement {
     if (!this._cfg) return;
     const cfg = this._cfg;
     const a = ACCENTS[cfg.accent] || ACCENTS.us;
+    // 单模型模式在开始时确定，中途切换设置要到下一次才生效
+    this.single = !!getSetting("singleModelMode");
+    const TL = teacherLang(undefined, cfg.accent);
     this.state = "idle";
     this.session = {
       id: `s_${Date.now()}`,
@@ -75,22 +110,27 @@ class ViewChat extends HTMLElement {
       accent: cfg.accent,
       level: cfg.level,
       mode: cfg.mode,
-      teacherLang: teacherLang(undefined, cfg.accent).key,
+      teacherLang: TL.key,
+      singleModel: this.single,
       transcript: [],
       turns: [],
       summary: null,
       events: new EventTarget(),
     };
 
+    const teacherWord = TL.key === "en" ? "英文老师" : "中文老师";
+    const intro = this.single
+      ? `你每说完一句，同一个 AI 会先以<b>老师</b>身份点评（${TL.key === "en" ? "英文" : "中文"}），再回到角色。`
+      : `你每说完一句，<b>${teacherWord}</b>会给出点评${getSetting("teacherVoiceOn") ? "并用语音说出来" : ""}。`;
     this.innerHTML = `
       <div class="chat">
         <div class="chat-top">
           <button class="icon-btn" id="back" aria-label="返回">←</button>
           <div class="chat-title">
             <div class="t1">${cfg.mission.icon} ${escapeHtml(cfg.mission.title_zh)}${cfg.topic ? `：${escapeHtml(cfg.topic)}` : ""}</div>
-            <div class="t2">${a.short} · ${(LEVELS[cfg.level] || LEVELS.intermediate).label} · ${cfg.mode === "assisted" ? "辅助" : "沉浸"} · 对方：${escapeHtml(cfg.mission.role_zh)}</div>
+            <div class="t2">${a.short} · ${(LEVELS[cfg.level] || LEVELS.intermediate).label} · ${cfg.mode === "assisted" ? "辅助" : "沉浸"}${this.single ? " · 单模型" : ""} · 对方：${escapeHtml(cfg.mission.role_zh)}</div>
           </div>
-          <button class="chip step-chip ${getSetting("stepMode") ? "on" : ""}" id="step-toggle" title="逐句模式：每句话后看完老师反馈，再点“下一句”继续">逐句</button>
+          <button class="chip step-chip ${getSetting("stepMode") ? "on" : ""}" id="step-toggle" title="逐句模式：每说完一句先看老师点评，点“下一句”后对方才回应">逐句</button>
           <div class="timer" id="timer">0:00</div>
         </div>
 
@@ -103,7 +143,8 @@ class ViewChat extends HTMLElement {
         <div class="transcript" id="transcript">
           <div class="empty-hint" id="empty-hint">
             <p>🎧 建议戴耳机，效果更好。</p>
-            <p>点下方按钮开始，对方会先开口。你每说完一句，<b>中文老师</b>会给出点评${getSetting("teacherVoiceOn") ? "并用语音说出来" : ""}。</p>
+            <p>点下方按钮开始，对方会先开口。${intro}</p>
+            <p>${getSetting("stepMode") ? "逐句模式：说完一句先看点评，点“下一句”后对方才回应；不满意可以“重说”。" : "实时模式：对方会直接回应你。"}</p>
             ${cfg.mission.custom ? "" : `<p class="goal">🎯 目标：${escapeHtml(cfg.mission.desc_zh)}</p>`}
           </div>
         </div>
@@ -114,14 +155,18 @@ class ViewChat extends HTMLElement {
         </div>
 
         <div class="step-panel hidden" id="step-panel">
-          <span id="step-text">🧑‍🏫 老师点评中…</span>
-          <button class="link-btn" id="step-skip">跳过等待</button>
+          <span id="step-text">🎙️ 正在听…</span>
+          <span class="step-links">
+            <button class="link-btn hidden" id="done-btn">说完了</button>
+            <button class="link-btn hidden" id="step-skip">跳过等待</button>
+          </span>
         </div>
 
         <div class="chat-bottom">
           <div class="viz-row small"><audio-visualizer id="user-viz"></audio-visualizer></div>
           <div class="controls">
-            <button class="chip ${getSetting("teacherVoiceOn") ? "on" : ""}" id="voice-toggle" title="老师语音点评">🔊 老师语音</button>
+            <button class="chip ${getSetting("teacherVoiceOn") ? "on" : ""} ${this.single ? "hidden" : ""}" id="voice-toggle" title="老师语音点评">🔊 老师语音</button>
+            <button class="cta-btn redo-btn hidden" id="redo-btn" title="丢掉这句的录音和点评，重新说">↺ 重说</button>
             <button class="cta-btn next-btn hidden" id="next-btn" disabled>老师点评中…</button>
             <button class="cta-btn" id="main-btn">开始对话</button>
           </div>
@@ -142,36 +187,33 @@ class ViewChat extends HTMLElement {
     };
     this.$("transcript").addEventListener("click", (e) => this.onTranscriptClick(e));
     this.$("next-btn").onclick = () => this.onNext();
-    this.$("step-skip").onclick = () => this.onNext(true);
-    this.$("step-toggle").onclick = () => {
-      const on = !getSetting("stepMode");
-      setSetting("stepMode", on);
-      this.$("step-toggle").classList.toggle("on", on);
-      this.setStatus(on ? "已开启逐句模式：每句话后看完点评再点“下一句”" : "已关闭逐句模式：可以连续对话", "var(--color-text-sub)");
-      // 关闭时如果正停在某一句，立即继续
-      if (!on && this.stepPaused) this.onNext(true);
-    };
+    this.$("step-skip").onclick = () => this.onSkipWait();
+    this.$("redo-btn").onclick = () => this.onRedo();
+    this.$("done-btn").onclick = () => this.onDoneSpeaking();
+    this.$("step-toggle").onclick = () => this.onStepToggle();
   }
 
-  // ---------------- 逐句模式 ----------------
+  // ======================================================================
+  // 逐句流程
+  // ======================================================================
   stepOn() {
-    return !!getSetting("stepMode");
+    return this.flow === "step";
   }
 
-  /** 一句话结束：暂停上传麦克风，等老师点评 */
-  enterStepPause(turn) {
-    this.stepPaused = true;
-    this.stepTurn = turn;
-    this.userChunks = [];
+  setPhase(phase) {
+    this.stepPhase = phase;
+    if (phase === "listen") {
+      this.userChunks = [];
+      this.resetVad();
+    }
     this.updateStepUI();
   }
 
-  /** 点评是否已经出来（完成/失败） */
+  /** 当前这句（review 阶段）是否可以点“下一句” */
   stepReady() {
     const t = this.stepTurn;
-    if (this.liveDown && !t) return true;
-    if (!t) return true;
-    // 点评完成，且老师语音已经准备好/播完/跳过（语音还在合成时也算“没准备好”，可以点“跳过等待”）
+    if (!t || t.skipWait) return true;
+    if (this.single) return !!t.singleDone;
     return (t.status === "done" || t.status === "error") && t.voice !== "waiting";
   }
 
@@ -179,60 +221,340 @@ class ViewChat extends HTMLElement {
     const panel = this.$("step-panel");
     const next = this.$("next-btn");
     const main = this.$("main-btn");
+    const redo = this.$("redo-btn");
+    const done = this.$("done-btn");
+    const skip = this.$("step-skip");
     if (!panel || !next || !main) return;
-    const show = this.stepPaused && (this.state === "active" || this.reconnecting);
+    const show = this.stepOn() && (this.state === "active" || this.reconnecting);
     panel.classList.toggle("hidden", !show);
-    next.classList.toggle("hidden", !show);
-    main.classList.toggle("compact", show);
-    if (!show) return;
-    // 逐句暂停时不显示“请稍候”横幅，由逐句面板提示
-    this.$("hold-banner")?.classList.add("hidden");
-    const ready = this.stepReady();
-    if (this.reconnecting) {
-      next.disabled = true;
-      next.textContent = "重新连接中…";
-      this.$("step-text").textContent = "🔌 正在重新连接，马上就好…";
-      this.$("step-skip").classList.add("hidden");
+    if (!show) {
+      next.classList.add("hidden");
+      redo.classList.add("hidden");
+      main.classList.remove("compact");
       return;
     }
-    next.disabled = !ready;
-    next.textContent = ready ? "下一句 ▶" : "老师点评中…";
-    this.$("step-skip").classList.toggle("hidden", ready);
-    let text;
-    if (!ready) text = "🧑‍🏫 老师正在听你刚才那句…";
-    else if (this.teacherSpeaking) text = "🧑‍🏫 老师正在点评，听完点“下一句”（点击会停止语音）";
-    else text = "✅ 看完点评后，点“下一句”继续说";
-    if (this.liveDown) text += "（连接已断开，点“下一句”会自动重连）";
-    this.$("step-text").textContent = text;
+    this.$("hold-banner")?.classList.add("hidden");
+    main.classList.add("compact");
     main.textContent = "结束";
+    const setText = (t) => (this.$("step-text").textContent = t);
+    const down = this.liveDown ? "（连接已断开，发送时会自动重连）" : "";
+    next.classList.add("hidden");
+    redo.classList.add("hidden");
+    done.classList.add("hidden");
+    skip.classList.add("hidden");
+    // 窄屏：出现“重说/下一句”时收起老师语音开关
+    const voiceChip = this.$("voice-toggle");
+    if (voiceChip && !this.single) voiceChip.classList.toggle("hidden", this.stepPhase === "review" || !!this.respondFailed);
+
+    if (this.reconnecting) {
+      next.classList.remove("hidden");
+      next.disabled = true;
+      next.textContent = "重新连接中…";
+      setText("🔌 正在重新连接，马上就好…");
+      return;
+    }
+    const phase = this.stepPhase;
+    if (phase === "listen") {
+      const heard = this.vad && this.vad.voiced >= VAD_MIN_VOICE;
+      setText(heard ? "🎙️ 正在听…说完停顿一下即可" : `🎙️ 请说${this.session.turns.length ? "下一句" : "第一句"}${down}`);
+      done.classList.toggle("hidden", !heard);
+      return;
+    }
+    if (phase === "review") {
+      const ready = this.stepReady();
+      next.classList.remove("hidden");
+      redo.classList.remove("hidden");
+      next.disabled = !ready;
+      if (ready) next.innerHTML = `下一句 ▶<small class="btn-sub">让对方回应</small>`;
+      else next.textContent = "老师点评中…";
+      skip.classList.toggle("hidden", ready);
+      let text;
+      if (!ready) text = this.single ? "🧑‍🏫 老师正在听你这句…" : "🧑‍🏫 老师正在听你刚才那句…";
+      else if (this.teacherSpeaking) text = "🧑‍🏫 老师正在点评，听完点“下一句”（点击会停止语音）";
+      else text = "✅ 看完点评后点“下一句”让对方回应；不满意可以“重说”";
+      setText(text + down);
+      return;
+    }
+    if (phase === "responding") {
+      if (this.respondFailed) {
+        next.classList.remove("hidden");
+        next.disabled = false;
+        next.textContent = "重试 ▶";
+        setText("⚠️ 对方没有回应，点“重试”再发一次");
+        return;
+      }
+      setText(this.modelSpeaking || this.player?.streaming ? "🎭 对方说话中…" : "⏳ 等待对方回应…");
+      return;
+    }
+    setText("");
   }
 
-  async onNext(skipWait = false) {
-    if (!this.stepPaused || this.reconnecting) return;
-    if (!skipWait && !this.stepReady()) return;
-    // 停掉老师语音，不再播放这一句
+  /** 本地 VAD 判定一句说完（或点了“说完了”） */
+  onStepSentenceEnd(manual = false) {
+    if (!this.stepOn() || this.stepPhase !== "listen") return;
+    const pcm = concatInt16(this.userChunks || []);
+    const trimmed = trimSilence(pcm, 16000);
+    if (!trimmed || trimmed.length < 16000 * 0.4) {
+      if (manual) this.setStatus("没听到你说话，再说一次吧", "var(--color-accent-secondary)");
+      this.setPhase("listen");
+      return;
+    }
+    const silenceMs = this.vadSilenceMs();
+    const turn = this.createTurn({ text: "", pcm: trimmed, spokeEnd: Date.now() - (manual ? 0 : silenceMs) });
+    turn.step = true;
+    this.setStatus("");
+    this.stepTurn = turn;
+    this.setPhase("review");
+    if (this.single) {
+      // 单模型：立刻把这句发给 Live，让它先点评（等“[continue]”才以角色回应）
+      this.singleTurn = turn;
+      this.renderTurn(turn);
+      this.sendStepAudio(turn, "feedback");
+    } else {
+      const job = this.startAnalysisJob({
+        pcm: trimmed,
+        asrText: "",
+        prevCharacterText: this.lastCharacterText,
+        spokeEnd: turn.t.spokeEnd,
+      });
+      this.adoptJob(turn, job);
+    }
+    this.revealStepCard(turn);
+  }
+
+  onDoneSpeaking() {
+    this.onStepSentenceEnd(true);
+  }
+
+  onSkipWait() {
+    const t = this.stepTurn;
+    if (!t) return;
+    t.skipWait = true;
     if (this.player) this.player.stopClip();
     stopBrowserSpeech();
-    const t = this.stepTurn;
-    if (t && t.voice !== "played" && t.voice !== "off") t.voice = "skipped";
+    if (t.voice === "waiting" || t.voice === "ready" || t.voice === "ready-browser") t.voice = "skipped";
+    this.teacherSpeaking = false;
+    this.updateStepUI();
+  }
+
+  /** 点“下一句”：把这句发给对方（单模型：发“[continue]”） */
+  async onNext() {
+    if (!this.stepOn() || this.reconnecting) return;
+    if (this.stepPhase === "responding" && this.respondFailed) return this.retryRespond();
+    if (this.stepPhase !== "review") return;
+    if (!this.stepReady()) return;
+    const turn = this.stepTurn;
+    // 停掉老师语音
+    if (this.player) this.player.stopClip();
+    stopBrowserSpeech();
+    if (turn && turn.voice !== "played" && turn.voice !== "off") turn.voice = "skipped";
     this.teacherQueue = this.teacherQueue.filter((x) => !["skipped", "off", "played"].includes(x.voice));
     this.teacherSpeaking = false;
-    this.holdStartedAt = 0;
     this.setHold(false);
-
-    if (this.liveDown) {
-      const ok = await this.reconnectLive();
-      if (!ok) return;
-    }
-    this.stepPaused = false;
     this.stepTurn = null;
-    this.userChunks = [];
+    this.replyTurn = turn;
+    this.respondFailed = false;
+    this.setPhase("responding");
+    if (this.single) await this.sendContinue(turn);
+    else await this.sendStepAudio(turn, "reply");
+  }
+
+  /** 重说：丢掉当前这句的录音和点评，重新录 */
+  onRedo() {
+    if (!this.stepOn() || this.stepPhase !== "review") return;
+    const turn = this.stepTurn;
+    if (!turn) return;
+    this.stopPlayback();
+    if (this.player) this.player.stopClip();
+    stopBrowserSpeech();
+    turn.job?.controller?.abort();
+    turn.cancelled = true;
+    turn.voice = "skipped";
+    this.clearWatchdog();
+    this.teacherQueue = this.teacherQueue.filter((x) => x !== turn);
+    this.teacherSpeaking = false;
+    this.session.turns = this.session.turns.filter((t) => t !== turn);
+    this.session.transcript = this.session.transcript.filter((e) => e.turnId !== turn.id);
+    this.querySelector(`[data-turn="${turn.id}"]`)?.remove();
+    if (this.lastFinalizedTurn === turn) this.lastFinalizedTurn = null;
+    if (this.single) {
+      // 已经发给模型了：告诉它忽略上一次尝试；正在输出的点评不再显示
+      if (this.singleTurn === turn) this.singleTurn = null;
+      if (this.modelSpeaking) {
+        this.ignoreModelTurn = true;
+        this.player?.interrupt();
+      }
+      if (turn.sentToLive && this.live && !this.liveDown) this.live.sendText(REDO_SIGNAL, false);
+    }
+    this.stepTurn = null;
+    this.emit();
+    this.setPhase("listen");
+    this.setStatus("↺ 请重说这一句", "var(--color-accent-secondary)");
+  }
+
+  /** 逐句模式开关（对话中切换立即生效） */
+  onStepToggle() {
+    const on = !getSetting("stepMode");
+    setSetting("stepMode", on);
+    this.$("step-toggle").classList.toggle("on", on);
+    this.setStatus(
+      on ? "已开启逐句模式：说完一句先看点评，点“下一句”后对方才回应" : "已关闭逐句模式：对方会直接回应你",
+      "var(--color-text-sub)"
+    );
+    if (this.state !== "active") return;
+    const prev = this.flow;
+    const next = on ? "step" : "live";
+    if (prev === next) return;
+    if (next === "live") this.switchToLive();
+    else this.switchToStep();
+  }
+
+  switchToLive() {
+    const turn = this.stepTurn;
+    const phase = this.stepPhase;
+    this.flow = "live";
+    this.stepTurn = null;
+    this.clearWatchdog();
     this.updateStepUI();
     const main = this.$("main-btn");
     if (main) main.textContent = "结束并查看总结";
-    this.setStatus("🎙️ 请说下一句", "var(--color-success)");
+    // 单模型的提示词跟逐句模式有关：重连换成实时版本
+    if (this.single) this.needReconnect = true;
+    if (phase === "review" && turn) {
+      // 还没发给对方的这句：现在发出去，对方照常回应
+      this.replyTurn = turn;
+      if (this.single) this.sendContinue(turn);
+      else this.sendStepAudio(turn, "reply");
+    } else if (this.needReconnect && !this.modelSpeaking) {
+      this.ensureLive();
+    }
+    this.userChunks = [];
+    this.resetVad();
   }
 
+  switchToStep() {
+    this.flow = "step";
+    if (this.single) this.needReconnect = true;
+    // 对方正在说：等它说完再开始录下一句
+    if (this.modelSpeaking || this.player?.streaming) {
+      this.replyTurn = null;
+      this.setPhase("responding");
+    } else {
+      this.setPhase("listen");
+    }
+  }
+
+  /** 确保 Live 连着（断开或需要换提示词时重连）；失败返回 false */
+  async ensureLive() {
+    if (!this.liveDown && !this.needReconnect) return true;
+    return this.reconnectLive();
+  }
+
+  /**
+   * 把这句录音补发给 Live：按 100ms 一块、比实时快地发送，然后补一段静音让服务端判定说完。
+   * purpose: "reply"（让角色回应）| "feedback"（单模型先点评）
+   */
+  async sendStepAudio(turn, purpose) {
+    const ok = await this.ensureLive();
+    if (!ok) {
+      this.respondFailed = true;
+      this.updateStepUI();
+      return;
+    }
+    const live = this.live;
+    turn.sentToLive = true;
+    this.awaitingTurn = turn;
+    this.awaitPurpose = purpose;
+    this.asrTarget = turn;
+    this.modelOutputSince = false;
+    const pcm = turn.pcm;
+    const total = pcm.length + Math.round(16000 * SILENCE_TAIL_SEC);
+    const silence = new Int16Array(SEND_CHUNK);
+    for (let off = 0; off < total; off += SEND_CHUNK) {
+      if (this.live !== live || this.state !== "active" || turn.cancelled) return;
+      live.sendAudio(off < pcm.length ? pcm.subarray(off, Math.min(pcm.length, off + SEND_CHUNK)) : silence);
+      await sleep(SEND_INTERVAL_MS);
+    }
+    if (turn.cancelled) return;
+    this.startWatchdog(purpose);
+  }
+
+  /** 单模型：让角色回应（发送“[continue]”） */
+  async sendContinue(turn) {
+    const ok = await this.ensureLive();
+    if (!ok) {
+      this.respondFailed = true;
+      this.updateStepUI();
+      return;
+    }
+    this.awaitingTurn = turn;
+    this.awaitPurpose = "reply";
+    this.modelOutputSince = false;
+    if (this.flow === "live") {
+      // 已切回实时模式：直接让它以角色身份回应
+      this.live.sendText(`${CONTINUE_SIGNAL} Reply in character now.`);
+    } else {
+      this.live.sendText(CONTINUE_SIGNAL);
+    }
+    this.startWatchdog("reply");
+  }
+
+  startWatchdog(purpose) {
+    this.clearWatchdog();
+    this.watchdogTries = 0;
+    const arm = () => {
+      this.watchdog = setTimeout(() => {
+        this.watchdog = null;
+        if (this.modelOutputSince || this.state !== "active") return;
+        if (this.watchdogTries === 0 && this.live && !this.liveDown) {
+          this.watchdogTries++;
+          console.warn("[逐句] 8 秒没回应，发送文字提示");
+          this.live.sendText(purpose === "feedback" ? NUDGE_FEEDBACK : this.single ? CONTINUE_SIGNAL : NUDGE_REPLY);
+          arm();
+          return;
+        }
+        // 两次都没回应：给出重试
+        if (purpose === "feedback") {
+          const t = this.stepTurn;
+          if (t && !t.analysis) this.markMissing(t, "模型没有回应");
+          if (t) t.singleDone = true;
+          this.updateStepUI();
+        } else {
+          this.respondFailed = true;
+          this.updateStepUI();
+        }
+      }, RESPONSE_WATCHDOG_MS);
+    };
+    arm();
+  }
+
+  clearWatchdog() {
+    if (this.watchdog) clearTimeout(this.watchdog);
+    this.watchdog = null;
+  }
+
+  async retryRespond() {
+    const turn = this.replyTurn;
+    this.respondFailed = false;
+    this.updateStepUI();
+    if (this.single) await this.sendContinue(turn);
+    else if (turn) await this.sendStepAudio(turn, "reply");
+    else this.setPhase("listen"); // 开场白没出来：直接让用户先说
+  }
+
+  /** 角色这一轮说完（并且播放完）：开始录下一句 */
+  onRespondFinished() {
+    this.replyTurn = null;
+    this.respondFailed = false;
+    if (this.stepOn() && this.stepPhase === "responding") {
+      this.setPhase("listen");
+      this.setStatus("🎙️ 请说下一句", "var(--color-success)");
+    }
+  }
+
+  // ======================================================================
+  // 连接
+  // ======================================================================
   /** Live 连接断开（会话到期/goAway/空闲断开）后重连，并把最近对话作为上下文 */
   async reconnectLive() {
     this.reconnecting = true;
@@ -251,20 +573,19 @@ class ViewChat extends HTMLElement {
       }
       await this.connectLive(relay, this.buildResumeContext());
       this.liveDown = false;
+      this.needReconnect = false;
       this.goAwayPending = false;
       this.reconnecting = false;
+      this.modelSpeaking = false;
       if (this._onPageHide) window.addEventListener("pagehide", this._onPageHide);
+      this.updateStepUI();
       return true;
     } catch (e) {
       console.error("重连失败", e);
       this.reconnecting = false;
+      this.liveDown = true;
       this.updateStepUI();
-      const next = this.$("next-btn");
-      if (next) {
-        next.disabled = false;
-        next.textContent = "重试连接 ▶";
-      }
-      this.$("step-text").textContent = `⚠️ 重连失败：${e.message || e}。可以点“重试连接”，或者点“结束”查看总结。`;
+      this.setStatus(`⚠️ 重连失败：${e.message || e}。可以再试一次，或者点“结束”查看总结。`, "var(--color-danger)");
       return false;
     }
   }
@@ -310,7 +631,7 @@ class ViewChat extends HTMLElement {
     return { live, relay };
   }
 
-  /** 逐句模式下连接即将到期或已断开：标记为需要重连，等用户点“下一句” */
+  /** 连接即将到期或已断开：标记为需要重连，下次发送时自动重连 */
   markLiveDown(message) {
     this.liveDown = true;
     if (this.live) {
@@ -318,9 +639,16 @@ class ViewChat extends HTMLElement {
       this.live.close();
     }
     this.finishRelay();
-    if (!this.stepPaused) {
-      // 正在说话时断开：先停下来，让用户点一下继续
-      this.enterStepPause(null);
+    this.clearWatchdog();
+    if (this.modelSpeaking) {
+      this.modelSpeaking = false;
+      this.finishModelTurn(true);
+    }
+    if (this.stepPhase === "responding" && this.replyTurn) {
+      // 对方还没回应就断了：让用户点“重试”（会自动重连）
+      this.respondFailed = true;
+    } else if (this.stepPhase === "responding") {
+      this.setPhase("listen");
     }
     if (message) this.setStatus(message, "var(--color-accent-secondary)");
     this.updateStepUI();
@@ -351,9 +679,10 @@ class ViewChat extends HTMLElement {
     else if (this.state === "active" || this.state === "ended-unexpectedly") this.endSession();
   }
 
-  // ---------------- 会话生命周期 ----------------
+  // ======================================================================
+  // 会话生命周期
+  // ======================================================================
   async startSession() {
-    const cfg = this._cfg;
     this.state = "connecting";
     const btn = this.$("main-btn");
     btn.disabled = true;
@@ -361,6 +690,8 @@ class ViewChat extends HTMLElement {
     this.setStatus("正在打开麦克风并连接…");
 
     // 运行时状态
+    this.flow = getSetting("stepMode") ? "step" : "live";
+    this.stepPhase = "idle";
     this.userChunks = [];
     this.ring = [];
     this.ringLen = 0;
@@ -373,11 +704,17 @@ class ViewChat extends HTMLElement {
     this.teacherSpeaking = false;
     this.holdStartedAt = 0;
     this.micHeld = false;
-    this.stepPaused = false;
     this.stepTurn = null;
+    this.replyTurn = null;
+    this.singleTurn = null;
     this.liveDown = false;
+    this.needReconnect = false;
     this.reconnecting = false;
     this.goAwayPending = false;
+    this.respondFailed = false;
+    this.mt = null;
+    this.ignoreModelTurn = false;
+    this.pendingDrain = null;
     this.resetVad();
     this.earlyJob = null;
 
@@ -398,12 +735,12 @@ class ViewChat extends HTMLElement {
         getStream: () => this.streamer?.mediaStream,
         onTrackEnded: () => this.onMicEnded(),
       });
-      this.player.onDrained = () => this.pumpTeacher();
+      this.player.onDrained = () => this.onPlayerDrained();
 
       this.$("user-viz").connect(this.streamer.audioContext, this.streamer.source);
       this.$("model-viz").connect(this.player.audioContext, this.player.gainNode);
 
-      // 邀请码模式：先向中转服务申请一次性令牌（同时预留今日额度）
+      // 邀请码模式：先向中转服务申请一次性令牌
       this.sessionLimitSec = SESSION_LIMIT_SEC;
       let relay = null;
       if (authMode() === "invite") {
@@ -422,14 +759,19 @@ class ViewChat extends HTMLElement {
       this.session.startedAt = Date.now();
       this.connectedAt = this.session.startedAt;
       live.sendText("[START]");
+      if (this.stepOn()) {
+        // 对方先开口；说完后开始录第一句
+        this.replyTurn = null;
+        this.setPhase("responding");
+        this.modelOutputSince = false;
+        this.startWatchdog("reply");
+      }
 
       btn.disabled = false;
-      btn.textContent = "结束并查看总结";
+      btn.textContent = this.stepOn() ? "结束" : "结束并查看总结";
       btn.classList.add("active");
-      this.setStatus(
-        relay ? `已连接，对方马上开口…（本次最多 ${relay.grantedMinutes} 分钟）` : "已连接，对方马上开口…",
-        "var(--color-success)"
-      );
+      const unl = relay && relay.grantedMinutes && relay.grantedMinutes < 15 ? `（本次最多 ${relay.grantedMinutes} 分钟）` : "";
+      this.setStatus(`已连接，对方马上开口…${unl}`, "var(--color-success)");
       this._onPageHide = () => this.finishRelay();
       window.addEventListener("pagehide", this._onPageHide);
       const hint = this.$("empty-hint");
@@ -455,53 +797,62 @@ class ViewChat extends HTMLElement {
   /** 创建 LiveSession 并挂好回调（不连接） */
   buildLive(relay, resumeContext) {
     const cfg = this._cfg;
-    let systemInstruction = buildSystemInstruction(cfg);
+    const step = this.flow === "step";
+    let systemInstruction = buildSystemInstruction(cfg, { single: this.single, step });
     if (resumeContext) {
       systemInstruction += `
 
 RESUMING: The connection dropped and has just been restored in the middle of this conversation. Here is the conversation so far (most recent last):
 ${resumeContext}
 
-Continue seamlessly from exactly this point. Do NOT greet again, do NOT restart or summarize the conversation, and ignore any "[START]" instruction. Stay silent until the learner speaks, then reply naturally in character.`;
+Continue seamlessly from exactly this point. Do NOT greet again, do NOT restart or summarize the conversation, and ignore any "[START]" instruction. Stay silent until the learner speaks${this.single && step ? ` or you receive "${CONTINUE_SIGNAL}" (then reply in character to the learner's last line above)` : ""}, then reply naturally in character.`;
     }
+    const model = getSetting("liveModel");
+    const tools = [];
+    if (!cfg.mission.custom) {
+      tools.push({
+        name: "complete_mission",
+        description: "Call this when the learner has successfully achieved the mission goal.",
+        parameters: {
+          type: "OBJECT",
+          properties: { note: { type: "STRING", description: "One short sentence about how the learner did." } },
+        },
+      });
+    }
+    if (this.single) tools.push(giveFeedbackDeclaration(cfg.accent, teacherLang(undefined, cfg.accent).key, model));
     const live = new LiveSession({
       apiKey: relay ? undefined : getSetting("apiKey"),
       url: relay ? relay.wsUrl : undefined,
-      model: getSetting("liveModel"),
+      model,
       voiceName: getSetting("characterVoice"),
       systemInstruction,
-      functionDeclarations: cfg.mission.custom
-        ? []
-        : [
-            {
-              name: "complete_mission",
-              description: "Call this when the learner has successfully achieved the mission goal.",
-              parameters: {
-                type: "OBJECT",
-                properties: { note: { type: "STRING", description: "One short sentence about how the learner did." } },
-              },
-            },
-          ],
+      functionDeclarations: tools,
     });
     this.live = live;
+    this.liveToolNonBlocking = /think/i.test(model);
     live.onAudio = (pcm) => {
+      if (this.live !== live) return;
       this.onModelOutput();
+      if (this.ignoreModelTurn) return;
+      this.recordModelAudio(pcm);
       this.player.play(pcm);
     };
     live.onOutputTranscript = (t) => {
+      if (this.live !== live) return;
       this.onModelOutput();
+      if (this.ignoreModelTurn) return;
       this.appendModelText(t);
     };
-    live.onInputTranscript = (t) => this.onInputText(t);
-    live.onTurnComplete = () => this.onModelTurnEnd(false);
-    live.onInterrupted = () => this.onModelTurnEnd(true);
-    live.onToolCall = (calls) => this.onToolCall(calls);
+    live.onInputTranscript = (t) => this.live === live && this.onInputText(t);
+    live.onTurnComplete = () => this.live === live && this.onModelTurnEnd(false);
+    live.onInterrupted = () => this.live === live && this.onModelTurnEnd(true);
+    live.onToolCall = (calls) => this.live === live && this.onToolCall(calls);
     live.onGoAway = () => {
       if (this.live !== live) return;
       if (this.stepOn()) {
-        // 逐句模式：停在当前句时直接断开，点“下一句”再重连；正在说话时等这句说完
-        if (this.stepPaused) this.markLiveDown("连接即将到期，点“下一句”会自动重新连接");
-        else this.goAwayPending = true;
+        // 逐句模式：没在说话时直接断开，下次发送时重连；正在说话时等这轮说完
+        if (this.modelSpeaking || this.stepPhase === "responding") this.goAwayPending = true;
+        else this.markLiveDown("连接即将到期，下次发送时会自动重新连接");
         return;
       }
       this.setStatus("连接即将到期，正在结束本次练习…", "var(--color-accent-secondary)");
@@ -511,7 +862,7 @@ Continue seamlessly from exactly this point. Do NOT greet again, do NOT restart 
       if (this.live !== live) return;
       if (info.byUser || this.state !== "active") return;
       if (this.stepOn()) {
-        this.markLiveDown(`⚠️ ${info.message || "连接已断开"}。点“下一句”会自动重新连接`);
+        this.markLiveDown(`⚠️ ${info.message || "连接已断开"}。下次发送时会自动重新连接`);
         return;
       }
       this.state = "ended-unexpectedly";
@@ -535,13 +886,15 @@ Continue seamlessly from exactly this point. Do NOT greet again, do NOT restart 
     el.textContent = formatDuration(sec);
     const limit = this.sessionLimitSec || SESSION_LIMIT_SEC;
     if (this.stepOn()) {
-      // 逐句模式：单次连接快到上限时不结束练习，而是断开后自动重连
+      // 逐句模式：单次连接快到上限时不结束练习，而是断开后在下次发送时自动重连
       const connSec = this.connectedAt ? (Date.now() - this.connectedAt) / 1000 : 0;
       el.classList.remove("warn");
       if (!this.liveDown && !this.reconnecting) {
-        if (this.stepPaused && connSec >= limit - 30) this.markLiveDown("单次连接快到 15 分钟上限，点“下一句”会自动重新连接");
-        else if (connSec >= limit - 5) this.markLiveDown("已达到单次连接时长上限，点“下一句”会自动重新连接");
+        const idle = this.stepPhase === "listen" || this.stepPhase === "review";
+        if (idle && !this.modelSpeaking && connSec >= limit - 30) this.markLiveDown("");
+        else if (connSec >= limit - 5) this.markLiveDown("已达到单次连接时长上限，下次发送时会自动重新连接");
       }
+      if (this.stepPhase === "listen") this.updateListenHint();
       this.pumpTeacher();
       return;
     }
@@ -555,6 +908,14 @@ Continue seamlessly from exactly this point. Do NOT greet again, do NOT restart 
       return;
     }
     this.pumpTeacher();
+  }
+
+  updateListenHint() {
+    const heard = this.vad && this.vad.voiced >= VAD_MIN_VOICE;
+    if (heard !== this._lastHeard) {
+      this._lastHeard = heard;
+      this.updateStepUI();
+    }
   }
 
   /** 在用户手势里调用：解锁/恢复播放与采集的音频（iOS） */
@@ -601,6 +962,7 @@ Continue seamlessly from exactly this point. Do NOT greet again, do NOT restart 
   stopAudio() {
     clearInterval(this.timer);
     this.timer = null;
+    this.clearWatchdog();
     this.lifecycle?.stop();
     this.lifecycle = null;
     try { this.$("user-viz")?.disconnect(); } catch {}
@@ -631,12 +993,17 @@ Continue seamlessly from exactly this point. Do NOT greet again, do NOT restart 
 
   endSession() {
     if (this.state === "ended") return;
-    // 把最后一句没被模型回应的话也算上
-    if (!this.modelSpeaking && this.userChunks && this.userChunks.length && this.pendingUserText.trim()) {
+    // 实时流程：把最后一句没被模型回应的话也算上
+    if (!this.stepOn() && !this.modelSpeaking && this.userChunks && this.userChunks.length && this.pendingUserText.trim()) {
       this.finalizeUserTurn();
     }
     this.cancelEarly("session-end");
+    if (this.modelSpeaking) this.finishModelTurn(true);
     this.closeModelEntry();
+    // 单模型：还没拿到点评的句子标记为“未点评”，总结页不再等待
+    for (const t of this.session.turns) {
+      if (t.single && !t.analysis && t.status !== "error" && t.status !== "missing" && !t.job) this.markMissing(t, "对话已结束");
+    }
     this.state = "ended";
     if (this.live) this.live.close();
     this.stopAudio();
@@ -645,16 +1012,29 @@ Continue seamlessly from exactly this point. Do NOT greet again, do NOT restart 
     this.dispatchEvent(new CustomEvent("navigate", { bubbles: true, detail: { view: "summary", session: this.session } }));
   }
 
-  // ---------------- 音频与回合切分 ----------------
+  // ======================================================================
+  // 音频与回合切分
+  // ======================================================================
   onMicChunk(pcm) {
     if (this.state !== "active") return;
     this.ring.push(pcm);
     this.ringLen += pcm.length;
     while (this.ringLen > RING_SAMPLES && this.ring.length > 1) this.ringLen -= this.ring.shift().length;
 
-    if (this.stepPaused || this.liveDown || this.reconnecting) return; // 逐句模式暂停中：不上传、不录音
+    if (this.stepOn()) {
+      // 逐句：只在“听”的阶段本地录音，不上传
+      if (this.stepPhase !== "listen" || this.reconnecting) return;
+      if (this.clipPlaying || this.teacherSpeaking || this.modelSpeaking || this.player?.streaming) return;
+      this.userChunks.push(pcm);
+      const len = this.userChunks.reduce((n, c) => n + c.length, 0);
+      this.vadStep(pcm);
+      if (len >= STEP_MAX_SENTENCE) this.onStepSentenceEnd(true);
+      return;
+    }
+
+    if (this.liveDown || this.reconnecting) return;
     if (this.micHeld) return; // 老师说话时不上传、不录音
-    if (this.clipPlaying) return; // 正在回放录音/示范发音：不上传，避免把回放当成用户说话
+    if (this.clipPlaying) return; // 正在回放录音/示范发音：不上传
     if (!this.modelSpeaking && !(this.player && this.player.streaming)) {
       this.userChunks.push(pcm);
       this.vadStep(pcm);
@@ -662,19 +1042,35 @@ Continue seamlessly from exactly this point. Do NOT greet again, do NOT restart 
     this.live.sendAudio(pcm);
   }
 
+  /** 模型开始有输出（音频/文字/工具调用） */
   onModelOutput() {
+    this.modelOutputSince = true;
+    this.clearWatchdog();
     if (this.modelSpeaking) return;
     this.modelSpeaking = true;
-    const turn = this.finalizeUserTurn();
-    if (turn && this.stepOn() && !this.stepPaused) this.enterStepPause(turn);
+    if (!this.stepOn()) {
+      const turn = this.finalizeUserTurn();
+      if (this.single) this.singleTurn = turn;
+    }
     this.openModelEntry();
+    if (this.stepOn()) this.updateStepUI();
   }
 
   onInputText(t) {
+    if (this.stepOn()) {
+      // 逐句：补发音频之后才会收到转写，用它更新这句卡片上的文字
+      const turn = this.asrTarget;
+      if (!turn) return;
+      turn.asrText = joinText(turn.asrText || "", t);
+      turn.text = turn.asrText;
+      const entry = this.session.transcript.find((e) => e.turnId === turn.id);
+      if (entry) entry.text = turn.text;
+      this.scheduleRender(turn);
+      return;
+    }
     // 刚结束的一句话的迟到转写
     const lt = this.lastFinalizedTurn;
     if (this.modelSpeaking && lt && Date.now() - lt.finalizedAt < 3000) {
-      // 分析用的是录音，这里只更新卡片上的文字，不重新分析
       lt.text = joinText(lt.text, t);
       const entry = this.session.transcript.find((e) => e.turnId === lt.id);
       if (entry) entry.text = lt.text;
@@ -687,9 +1083,26 @@ Continue seamlessly from exactly this point. Do NOT greet again, do NOT restart 
 
   onModelTurnEnd(interrupted) {
     if (interrupted && this.player) this.player.interrupt();
+    const wasSpeaking = this.modelSpeaking;
     this.modelSpeaking = false;
+    const ignored = this.ignoreModelTurn;
+    this.ignoreModelTurn = false;
+    if (wasSpeaking) this.finishModelTurn(interrupted, ignored);
     this.closeModelEntry();
-    // 新一句开始：被打断时带上最近一小段音频（用户抢话的开头）
+
+    if (this.stepOn()) {
+      this.asrTarget = null;
+      // 这一轮是“让角色回应”：播放完后开始录下一句
+      if (this.stepPhase === "responding") {
+        this.afterDrain(() => this.onRespondFinished());
+      }
+      if (this.goAwayPending && !this.liveDown) this.markLiveDown("连接即将到期，下次发送时会自动重新连接");
+      this.updateStepUI();
+      this.pumpTeacher();
+      return;
+    }
+
+    // 实时流程：新一句开始；被打断时带上最近一小段音频（用户抢话的开头）
     if (interrupted) {
       const recent = [];
       let n = 0;
@@ -701,14 +1114,53 @@ Continue seamlessly from exactly this point. Do NOT greet again, do NOT restart 
     } else {
       this.userChunks = [];
     }
-    // 逐句模式下收到过 goAway：这句说完就断开，点“下一句”时重连
-    if (this.goAwayPending && this.stepOn() && !this.liveDown) {
-      if (!this.stepPaused) this.enterStepPause(null);
-      this.markLiveDown("连接即将到期，点“下一句”会自动重新连接");
+    if (this.needReconnect && !this.liveDown) {
+      // 单模型切换了逐句模式：在空档里换成对应的提示词
+      this.ensureLive();
     }
     this.pumpTeacher();
   }
 
+  /** 等模型音频播放完再执行 */
+  afterDrain(fn) {
+    if (this.player && this.player.streaming) this.pendingDrain = fn;
+    else fn();
+  }
+
+  onPlayerDrained() {
+    if (!this.modelSpeaking && this.pendingDrain) {
+      const fn = this.pendingDrain;
+      this.pendingDrain = null;
+      fn();
+    }
+    this.updateStepUI();
+    this.pumpTeacher();
+  }
+
+  /** 创建一句话的记录（卡片 + 会话数据） */
+  createTurn({ text, pcm, spokeEnd }) {
+    const turn = {
+      id: `t_${Date.now()}_${this.session.turns.length}`,
+      text: text || "",
+      pcm,
+      prevCharacterText: this.lastCharacterText,
+      status: this.single ? "analyzing" : "pending",
+      finalizedAt: Date.now(),
+      analysisStarted: false,
+      analysis: null,
+      teacherPcm: null,
+      single: this.single,
+      t: { spokeEnd: spokeEnd || Date.now(), analysisStart: Date.now() },
+      voice: this.single ? "live" : getSetting("teacherVoiceOn") ? "waiting" : "off",
+    };
+    this.session.turns.push(turn);
+    this.session.transcript.push({ role: "user", text: turn.text, turnId: turn.id });
+    this.lastFinalizedTurn = turn;
+    if (turn.voice === "waiting") this.teacherQueue.push(turn);
+    return turn;
+  }
+
+  /** 实时流程：模型开始回应时，把用户刚才这句定稿 */
   finalizeUserTurn() {
     const chunks = this.userChunks || [];
     this.userChunks = [];
@@ -727,22 +1179,12 @@ Continue seamlessly from exactly this point. Do NOT greet again, do NOT restart 
     if (!text && !trimmed) return drop();
     if (!text && !this.lastCharacterText) return drop(); // 开场前的环境声
     if (!text && trimmed && trimmed.length < 16000 * 0.6) return drop(); // 很短又没有转写，多半是噪音
-    const turn = {
-      id: `t_${Date.now()}_${this.session.turns.length}`,
-      text,
-      pcm: trimmed || pcm,
-      prevCharacterText: this.lastCharacterText,
-      status: "pending",
-      finalizedAt: Date.now(),
-      analysisStarted: false,
-      analysis: null,
-      teacherPcm: null,
-      voice: getSetting("teacherVoiceOn") ? "waiting" : "off",
-    };
-    this.session.turns.push(turn);
-    this.session.transcript.push({ role: "user", text, turnId: turn.id });
-    this.lastFinalizedTurn = turn;
-    if (turn.voice === "waiting") this.teacherQueue.push(turn);
+    const turn = this.createTurn({ text, pcm: trimmed || pcm, spokeEnd: Date.now() - silenceMs });
+    if (this.single) {
+      if (early) early.controller.abort();
+      this.renderTurn(turn);
+      return turn;
+    }
     // 本地 VAD 已经提前开始分析（且之后没再说话）：直接沿用；否则现在立刻开始
     const job =
       early ||
@@ -750,22 +1192,25 @@ Continue seamlessly from exactly this point. Do NOT greet again, do NOT restart 
         pcm: turn.pcm,
         asrText: text,
         prevCharacterText: this.lastCharacterText,
-        spokeEnd: Date.now() - silenceMs,
+        spokeEnd: turn.t.spokeEnd,
       });
     this.adoptJob(turn, job);
     return turn;
   }
 
-  /** 逐句模式：当前这句的老师卡片滚动到可见位置 */
+  /** 当前这句的老师卡片滚动到可见位置 */
   revealStepCard(turn) {
-    if (!this.stepPaused || this.stepTurn !== turn) return;
+    if (!this.stepOn() || this.stepTurn !== turn) return;
     const card = this.querySelector(`[data-turn="${turn.id}"] .teacher-card`);
     card?.scrollIntoView({ behavior: "smooth", block: "nearest" });
   }
 
-  // ---------------- 本地 VAD（提前开始分析） ----------------
+  // ======================================================================
+  // 本地 VAD（实时流程：提前开始分析；逐句流程：判定一句说完）
+  // ======================================================================
   resetVad() {
     this.vad = { ref: null, voiced: 0, silence: 0, streak: 0, noise: 0.004 };
+    this._lastHeard = false;
   }
 
   vadSilenceMs() {
@@ -790,15 +1235,18 @@ Continue seamlessly from exactly this point. Do NOT greet again, do NOT restart 
       v.streak++;
       if (this.earlyJob) {
         this.earlyJob.dirty = true;
-        // 又连续说了 ~170ms 以上：之前的“说完”判断不成立，取消提前分析
         if (v.streak >= 2) this.cancelEarly("resumed");
       }
     } else {
       v.streak = 0;
       v.noise = v.noise * 0.95 + e * 0.05;
       if (v.voiced >= VAD_MIN_VOICE) v.silence += pcm.length;
-      if (!this.earlyJob && v.voiced >= VAD_MIN_VOICE && v.silence >= VAD_END_SILENCE && !v.triedAt) {
-        this.startEarly();
+      if (v.voiced >= VAD_MIN_VOICE && v.silence >= VAD_END_SILENCE) {
+        if (this.stepOn()) {
+          this.onStepSentenceEnd(false);
+          return;
+        }
+        if (!this.single && !this.earlyJob && !v.triedAt) this.startEarly();
       }
     }
   }
@@ -843,6 +1291,9 @@ Continue seamlessly from exactly this point. Do NOT greet again, do NOT restart 
     return job;
   }
 
+  // ======================================================================
+  // 独立老师（流式分析）
+  // ======================================================================
   /** 开始一次（流式）老师分析；结果先存在 job 上，句子定稿后再挂到 turn 上 */
   startAnalysisJob({ pcm, asrText, prevCharacterText, spokeEnd }) {
     const cfg = this._cfg;
@@ -912,6 +1363,7 @@ Continue seamlessly from exactly this point. Do NOT greet again, do NOT restart 
   onJobProgress(job) {
     const turn = job.turn;
     if (!turn || turn.status === "done" || turn.status === "error") return;
+    if (!this.session.turns.includes(turn)) return; // 已经“重说”
     const p = job.partial || {};
     turn.partial = p;
     if (p.no_speech === true && turn.voice === "waiting") turn.voice = "skipped";
@@ -924,7 +1376,7 @@ Continue seamlessly from exactly this point. Do NOT greet again, do NOT restart 
 
   onJobDone(job) {
     const turn = job.turn;
-    if (!turn) return;
+    if (!turn || !this.session.turns.includes(turn)) return;
     const entry = this.session.transcript.find((e) => e.turnId === turn.id);
     if (job.error) {
       console.error("点评失败", job.error);
@@ -954,7 +1406,7 @@ Continue seamlessly from exactly this point. Do NOT greet again, do NOT restart 
     this.pumpTeacher();
   }
 
-  /** 准备老师语音：设备语音直接就绪；Gemini 语音在后台合成（和剩余的流式生成并行） */
+  /** 准备老师语音：设备语音直接就绪；Gemini 语音在后台合成 */
   prepareTeacherVoice(turn) {
     if (turn.voice !== "waiting" || this.state !== "active") return;
     if (getSetting("teacherVoiceSource") !== "gemini") {
@@ -982,7 +1434,7 @@ Continue seamlessly from exactly this point. Do NOT greet again, do NOT restart 
     if (turn._raf) return;
     turn._raf = requestAnimationFrame(() => {
       turn._raf = 0;
-      this.renderTurn(turn);
+      if (this.session.turns.includes(turn)) this.renderTurn(turn);
     });
   }
 
@@ -1002,7 +1454,7 @@ Continue seamlessly from exactly this point. Do NOT greet again, do NOT restart 
       if (t.firstToken) parts.push(`首字 +${s(t.firstToken - t.spokeEnd)}`);
       parts.push(`完成 +${s(t.cardDone - t.spokeEnd)}`);
       if (t.voiceStart) parts.push(`语音 +${s(t.voiceStart - t.spokeEnd)}`);
-      out = `${parts.join(" · ")}${turn.job?.early ? "（提前触发）" : ""}`;
+      out = `${parts.join(" · ")}${turn.job?.early ? "（提前触发）" : ""}${turn.single && !turn.job ? "（单模型）" : ""}`;
     }
     return out;
   }
@@ -1012,7 +1464,7 @@ Continue seamlessly from exactly this point. Do NOT greet again, do NOT restart 
     if (!t || !t.spokeEnd) return;
     const r = (x) => (x ? `${x - t.spokeEnd}ms` : "-");
     console.log(
-      `[老师计时] 说完→开始分析 ${r(t.analysisStart)} · 首字 ${r(t.firstToken)} · 卡片完成 ${r(t.cardDone)} · 语音开始 ${r(t.voiceStart)}${turn.job?.early ? "（本地VAD提前）" : ""}`
+      `[老师计时] 说完→开始分析 ${r(t.analysisStart)} · 首字 ${r(t.firstToken)} · 卡片完成 ${r(t.cardDone)} · 语音开始 ${r(t.voiceStart)}${turn.job?.early ? "（本地VAD提前）" : ""}${turn.single && !turn.job ? "（单模型）" : ""}`
     );
   }
 
@@ -1020,11 +1472,12 @@ Continue seamlessly from exactly this point. Do NOT greet again, do NOT restart 
     this.session.events.dispatchEvent(new Event("update"));
   }
 
-  // ---------------- 老师语音排队 ----------------
+  // ======================================================================
+  // 老师语音排队（独立老师）
+  // ======================================================================
   pumpTeacher() {
     if (this.state !== "active") return this.setHold(false);
     if (this.clipPlaying) return; // 用户正在回放卡片上的音频：等它播完再播老师语音
-    // 去掉不需要播放的
     while (this.teacherQueue.length && ["skipped", "off", "played"].includes(this.teacherQueue[0].voice)) {
       this.teacherQueue.shift();
     }
@@ -1046,6 +1499,7 @@ Continue seamlessly from exactly this point. Do NOT greet again, do NOT restart 
         this.teacherQueue.shift();
         this.holdStartedAt = 0;
         this.setHold(false);
+        this.updateStepUI();
         this.pumpTeacher();
         return;
       }
@@ -1059,6 +1513,7 @@ Continue seamlessly from exactly this point. Do NOT greet again, do NOT restart 
   async playTeacher(turn) {
     this.teacherSpeaking = true;
     this.setHold(true, "🧑‍🏫 老师点评中，听完再继续说…");
+    this.updateStepUI();
     const card = this.querySelector(`[data-turn="${turn.id}"]`);
     card?.classList.add("speaking");
     card?.scrollIntoView({ behavior: "smooth", block: "nearest" });
@@ -1084,9 +1539,9 @@ Continue seamlessly from exactly this point. Do NOT greet again, do NOT restart 
     if (turn.voice !== "skipped") turn.voice = "played";
     if (this.teacherQueue[0] === turn) this.teacherQueue.shift();
     this.teacherSpeaking = false;
-    if (this.stepPaused) this.updateStepUI();
-    // 新的一句从这里开始录
-    this.userChunks = [];
+    this.updateStepUI();
+    // 实时流程：新的一句从这里开始录
+    if (!this.stepOn()) this.userChunks = [];
     this.pumpTeacher();
   }
 
@@ -1098,33 +1553,91 @@ Continue seamlessly from exactly this point. Do NOT greet again, do NOT restart 
       if (t.voice !== "played") t.voice = "skipped";
     });
     this.holdStartedAt = 0;
+    this.updateStepUI();
     this.pumpTeacher();
   }
 
   setHold(on, text) {
-    if (on && !this.micHeld) this.userChunks = [];
+    if (on && !this.micHeld && !this.stepOn()) this.userChunks = [];
     this.micHeld = on;
     const b = this.$("hold-banner");
     if (!b) return;
-    b.classList.toggle("hidden", !on || this.stepPaused);
+    b.classList.toggle("hidden", !on || this.stepOn());
     if (text) this.$("hold-text").textContent = text;
-    if (this.stepPaused) this.updateStepUI();
   }
 
-  // ---------------- 工具调用 ----------------
+  // ======================================================================
+  // 工具调用
+  // ======================================================================
   onToolCall(calls) {
     const responses = [];
     for (const c of calls) {
       if (c.name === "complete_mission") {
         this.session.missionComplete = true;
         this.$("mission-banner")?.classList.remove("hidden");
+      } else if (c.name === "give_feedback") {
+        this.onGiveFeedback(c.args || {});
       }
-      responses.push({ id: c.id, name: c.name, response: { result: "ok" } });
+      const response = c.name === "give_feedback" ? { ok: true } : { result: "ok" };
+      if (this.liveToolNonBlocking) response.scheduling = "SILENT";
+      responses.push({ id: c.id, name: c.name, response });
     }
     this.live.sendToolResponse(responses);
   }
 
-  // ---------------- 渲染 ----------------
+  /** 单模型：模型调用 give_feedback → 填充当前这句的卡片 */
+  onGiveFeedback(args) {
+    if (!this.single || this.ignoreModelTurn) return;
+    // 工具调用往往先于音频到达：先把用户这句定稿（实时流程）
+    this.onModelOutput();
+    let turn = this.singleTurn;
+    if (!turn || turn.analysis) {
+      // 没有对应的录音（比如被当成噪音丢掉了）：用模型听到的文字建一条
+      if (!args.transcript) return;
+      turn = this.createTurn({ text: args.transcript, pcm: null, spokeEnd: Date.now() });
+      this.singleTurn = turn;
+    }
+    const lang = teacherLang(undefined, this._cfg.accent).key;
+    const a = argsToAnalysis(args, lang);
+    turn.analysis = a;
+    turn.status = "done";
+    turn.t = turn.t || { spokeEnd: turn.finalizedAt, analysisStart: turn.finalizedAt };
+    turn.t.cardDone = Date.now();
+    if (!turn.text && a.transcript) {
+      turn.text = a.transcript;
+      const entry = this.session.transcript.find((e) => e.turnId === turn.id);
+      if (entry) entry.text = a.transcript;
+    }
+    if (this.mt) {
+      this.mt.feedbackTurn = turn;
+      if (!this.mt.pendingTurn) this.mt.pendingTurn = turn;
+    }
+    if (turn.liveTeacher) a.spoken_feedback_zh = turn.liveTeacher;
+    this.logTiming(turn);
+    this.renderTurn(turn);
+    this.emit();
+    this.updateStepUI();
+    this.revealStepCard(turn);
+  }
+
+  markMissing(turn, why) {
+    turn.status = "missing";
+    turn.error = `本句未点评${why ? `（${why}）` : ""}`;
+    this.renderTurn(turn);
+    this.emit();
+  }
+
+  // ======================================================================
+  // 模型输出：记录音频和文字（单模型模式下拆成老师/角色）
+  // ======================================================================
+  recordModelAudio(pcm) {
+    const mt = this.mt;
+    if (!mt) return;
+    if (!mt.firstAudioAt) mt.firstAudioAt = Date.now();
+    mt.audio.push(pcm);
+    mt.samples += pcm.length;
+  }
+
   scrollDown() {
     const tr = this.$("transcript");
     if (tr) tr.scrollTop = tr.scrollHeight;
@@ -1134,6 +1647,9 @@ Continue seamlessly from exactly this point. Do NOT greet again, do NOT restart 
     const entry = { role: "model", text: "" };
     this.session.transcript.push(entry);
     this.currentModelEntry = entry;
+    // 单模型：这一轮是否在等某句的点评
+    const fb = this.single && this.singleTurn && !this.singleTurn.singleDone ? this.singleTurn : null;
+    this.mt = { chunks: [], audio: [], samples: 0, full: "", firstAudioAt: 0, feedbackTurn: fb, pendingTurn: fb };
     const el = document.createElement("div");
     el.className = "bubble model temp";
     el.innerHTML = `<span class="who">${escapeHtml(this._cfg.mission.role_zh)}</span><span class="txt"></span>`;
@@ -1144,18 +1660,83 @@ Continue seamlessly from exactly this point. Do NOT greet again, do NOT restart 
 
   appendModelText(t) {
     if (!this.currentModelEntry) this.openModelEntry();
-    this.currentModelEntry.text = joinText(this.currentModelEntry.text, t);
-    this.currentModelEl.querySelector(".txt").textContent = this.currentModelEntry.text;
+    const mt = this.mt;
+    const before = mt.full;
+    mt.full = joinText(before, t);
+    mt.chunks.push({ start: mt.full.length - t.replace(/^\s+/, "").length, pos: mt.samples });
+    if (mt.pendingTurn) {
+      const sp = splitCoachText(mt.full, this.session.teacherLang, false);
+      this.applySplit(mt, sp, false);
+    } else {
+      this.currentModelEntry.text = mt.full;
+      this.currentModelEl.querySelector(".txt").textContent = mt.full;
+    }
     this.scrollDown();
+  }
+
+  /** 把拆分结果显示出来：老师部分进卡片，角色部分进气泡 */
+  applySplit(mt, sp, final) {
+    const turn = mt.pendingTurn;
+    this.currentModelEntry.text = sp.character;
+    if (this.currentModelEl) this.currentModelEl.querySelector(".txt").textContent = sp.character;
+    if (turn && sp.found) {
+      turn.liveTeacher = sp.teacher;
+      if (turn.analysis && sp.teacher) turn.analysis.spoken_feedback_zh = sp.teacher;
+      if (!turn.t?.voiceStart && mt.firstAudioAt && turn.t) turn.t.voiceStart = mt.firstAudioAt;
+      this.scheduleRender(turn);
+    }
+    if (final && turn && sp.found && sp.characterStart >= 0 && sp.character && this.stepOn()) {
+      // 逐句模式要求点评后停下，但模型直接接着说了角色台词：照常显示
+      turn.singleNoStop = true;
+      console.warn("[单模型] 模型点评后没有停下，直接说了角色台词");
+    }
+  }
+
+  /** 一轮模型输出结束：单模型模式下切出老师那段音频、检查是否漏了点评 */
+  finishModelTurn(interrupted, ignored = false) {
+    const mt = this.mt;
+    this.mt = null;
+    if (!mt || ignored) return;
+    const turn = mt.pendingTurn;
+    if (!turn) return;
+    const sp = splitCoachText(mt.full, this.session.teacherLang, true);
+    this.applySplit(mt, sp, true);
+    const pcm = concatInt16(mt.audio);
+    if (pcm.length && sp.found) {
+      let start = 0;
+      if (sp.teacherStart > 0) start = refineSplit(pcm, sampleAtChar(mt.chunks, sp.teacherStart));
+      let end = pcm.length;
+      if (sp.characterStart >= 0 && sp.character) end = refineSplit(pcm, sampleAtChar(mt.chunks, sp.characterStart));
+      if (end - start > 24000 * 0.3) turn.teacherPcm = pcm.slice(start, end);
+      else turn.teacherPcm = pcm;
+      turn.teacherWhole = !(end - start > 24000 * 0.3) || (sp.characterStart < 0 && !!sp.character);
+    } else if (pcm.length && turn.analysis) {
+      // 没找到“老师：”标记：只能回放整轮音频
+      turn.teacherPcm = pcm;
+      turn.teacherWhole = true;
+    }
+    if (turn.analysis && turn.liveTeacher) turn.analysis.spoken_feedback_zh = turn.liveTeacher;
+    if (!turn.analysis && turn.status !== "missing") {
+      this.markMissing(turn, interrupted ? "被打断" : sp.found ? "模型只给了口头提示" : "模型没有调用点评工具");
+    }
+    this.afterDrain(() => {
+      turn.singleDone = true;
+      if (this.singleTurn === turn) this.singleTurn = null;
+      this.renderTurn(turn);
+      this.updateStepUI();
+    });
+    this.renderTurn(turn);
+    this.emit();
   }
 
   closeModelEntry() {
     if (!this.currentModelEntry) return;
     const e = this.currentModelEntry;
-    e.text = e.text.trim();
+    e.text = (e.text || "").trim();
     if (e.text) this.lastCharacterText = e.text;
     // 给对应的用户句子补上角色回复（用于总结）
-    if (this.lastFinalizedTurn && !this.lastFinalizedTurn.characterReply) this.lastFinalizedTurn.characterReply = e.text;
+    const target = this.stepOn() ? this.replyTurn || (e.text ? this.lastFinalizedTurn : null) : this.lastFinalizedTurn;
+    if (target && !target.characterReply && e.text) target.characterReply = e.text;
     this.currentModelEl?.classList.remove("temp");
     if (!e.text) {
       this.currentModelEl?.remove();
@@ -1182,39 +1763,51 @@ Continue seamlessly from exactly this point. Do NOT greet again, do NOT restart 
   }
 
   renderTurn(turn) {
+    if (!this.session.turns.includes(turn)) return;
     let wrap = this.querySelector(`[data-turn="${turn.id}"]`);
     if (!wrap) {
       wrap = document.createElement("div");
       wrap.className = "turn";
       wrap.dataset.turn = turn.id;
-      this.$("transcript").appendChild(wrap);
+      const tr = this.$("transcript");
+      // 单模型实时流程：卡片要在本轮角色气泡之前
+      if (this.currentModelEl && this.currentModelEl.parentNode === tr) tr.insertBefore(wrap, this.currentModelEl);
+      else tr.appendChild(wrap);
       this.scrollDown();
     }
-    const fb =
-      turn.status === "error"
-        ? `<div class="fb-muted">点评失败：${escapeHtml(turn.error)}</div>`
-        : turn.analysis
-        ? feedbackHtml(turn.analysis, { compact: false, timing: this.timingText(turn) })
-        : turn.partial && Object.keys(turn.partial).length
-        ? feedbackHtml(turn.partial, { partial: true })
-        : `<div class="fb-loading"><span class="dots"></span> 老师正在听…</div>`;
-    const canTeacher = turn.analysis && !turn.analysis.no_speech && turn.status !== "error";
+    const TL = teacherLang(turn.analysis?._lang || this.session.teacherLang, this._cfg.accent);
+    let fb;
+    if (turn.status === "error") fb = `<div class="fb-muted">点评失败：${escapeHtml(turn.error)}</div>`;
+    else if (turn.status === "missing")
+      fb = `<div class="fb-muted">${escapeHtml(turn.error || "本句未点评")}</div>${
+        turn.liveTeacher ? `<div class="fb-row teacher-say"><span class="fb-label">${TL.labels.teacherSay}</span><span>${escapeHtml(turn.liveTeacher)}</span></div>` : ""
+      }${turn.pcm ? `<button class="small-btn" data-act="supplement">补充点评</button>` : ""}`;
+    else if (turn.analysis) fb = feedbackHtml(turn.analysis, { compact: false, timing: this.timingText(turn) });
+    else if (turn.partial && Object.keys(turn.partial).length) fb = feedbackHtml(turn.partial, { partial: true });
+    else if (turn.liveTeacher)
+      fb = `<div class="fb-row teacher-say"><span class="fb-label">${TL.labels.teacherSay}</span><span>${escapeHtml(turn.liveTeacher)}</span></div><div class="fb-loading"><span class="dots"></span> ${TL.labels.generating}</div>`;
+    else fb = `<div class="fb-loading"><span class="dots"></span> 老师正在听…</div>`;
+    const canTeacher = (turn.analysis && !turn.analysis.no_speech && turn.status !== "error") || (turn.status === "missing" && turn.teacherPcm);
+    const teacherLabel = turn.teacherPcm && turn.teacherWhole ? "▶ 老师语音（整段）" : "▶ 老师语音";
+    const userText = turn.text || (turn.step && !turn.analysis ? "（正在识别…）" : "（未识别到文字）");
     wrap.innerHTML = `
-      <div class="bubble user">${escapeHtml(turn.text || "（未识别到文字）")}</div>
+      <div class="bubble user">${escapeHtml(userText)}</div>
       <div class="teacher-card ${wrap.classList.contains("speaking") ? "speaking" : ""}">
-        <div class="tc-title">🧑‍🏫 老师点评</div>
+        <div class="tc-title">🧑‍🏫 ${TL.key === "en" ? "Coach" : "老师点评"}${turn.single ? `<span class="tc-badge">单模型</span>` : ""}</div>
         ${fb}
         <div class="tc-actions">
           <button class="play-btn" data-act="mine" ${turn.pcm ? "" : "disabled"}>▶ 我的录音</button>
-          ${canTeacher ? `<button class="play-btn teacher" data-act="teacher">▶ 老师语音</button>` : ""}
+          ${canTeacher ? `<button class="play-btn teacher" data-act="teacher">${teacherLabel}</button>` : ""}
         </div>
       </div>
     `;
     this.reapplyPlaying(wrap, turn);
-    if (turn.analysis && !this.stepPaused) this.scrollDown();
+    if (turn.analysis && !this.stepOn()) this.scrollDown();
   }
 
-  // ---------------- 卡片上的播放（互斥） ----------------
+  // ======================================================================
+  // 卡片上的播放（互斥）
+  // ======================================================================
   btnKey(turn, btn) {
     return `${turn.id}|${btn.dataset.act}|${btn.dataset.word || ""}`;
   }
@@ -1266,7 +1859,7 @@ Continue seamlessly from exactly this point. Do NOT greet again, do NOT restart 
     this.stopPlayback();
     this.playingKey = key;
     this.playingState = "loading";
-    this.clipPlaying = true; // 加载和播放期间都暂停上传麦克风
+    this.clipPlaying = true; // 加载和播放期间都暂停上传/录音
     this.setBtnState(this.findBtn(key), "loading");
     let res = null;
     try {
@@ -1284,6 +1877,26 @@ Continue seamlessly from exactly this point. Do NOT greet again, do NOT restart 
       console.warn(e);
     }
     if (this.playingKey === key) this.stopPlayback();
+    // 逐句“听”的阶段：回放的声音不能算进这句录音
+    if (this.stepOn() && this.stepPhase === "listen") this.setPhase("listen");
+  }
+
+  /** 单模型漏掉点评：用独立老师补一次 */
+  supplement(turn) {
+    if (!turn.pcm) return;
+    turn.status = "analyzing";
+    turn.error = null;
+    turn.supplemented = true;
+    turn.teacherPcm = null;
+    turn.teacherWhole = false;
+    turn.voice = "off";
+    const job = this.startAnalysisJob({
+      pcm: turn.pcm,
+      asrText: turn.text,
+      prevCharacterText: turn.prevCharacterText,
+      spokeEnd: Date.now(),
+    });
+    this.adoptJob(turn, job);
   }
 
   async onTranscriptClick(e) {
@@ -1295,7 +1908,9 @@ Continue seamlessly from exactly this point. Do NOT greet again, do NOT restart 
     const a = turn.analysis;
     const lang = (ACCENTS[this._cfg.accent] || ACCENTS.us).bcp47;
     const act = btn.dataset.act;
-    if (act === "mine" && turn.pcm) {
+    if (act === "supplement") {
+      this.supplement(turn);
+    } else if (act === "mine" && turn.pcm) {
       this.playOnCard(turn, btn, async () => ({ pcm: turn.pcm, rate: 16000 }));
     } else if (act === "native" && a) {
       this.playOnCard(turn, btn, async () => ({ pcm: await nativeTTS(a.better_expression, this._cfg.accent), rate: 24000 }), () =>
@@ -1306,30 +1921,37 @@ Continue seamlessly from exactly this point. Do NOT greet again, do NOT restart 
       this.playOnCard(turn, btn, async () => ({ pcm: await wordTTS(w, this._cfg.accent), rate: 24000 }), () =>
         speakBrowser(`${w}. ${w}.`, lang, 0.8)
       );
-    } else if (act === "teacher" && a) {
+    } else if (act === "teacher" && (a || turn.teacherPcm)) {
       // 老师语音：手动回放时，自动播放队列里就不再播这一句
-      if (turn.voice !== "played" && turn.voice !== "off") turn.voice = "skipped";
+      if (turn.voice !== "played" && turn.voice !== "off" && turn.voice !== "live") turn.voice = "skipped";
       const browser = getSetting("teacherVoiceSource") === "browser";
+      const text = turn.spokenText || a?.spoken_feedback_zh;
       this.playOnCard(
         turn,
         btn,
         async () => {
           if (turn.teacherPcm) return { pcm: turn.teacherPcm, rate: 24000 };
-          if (browser) return null;
-          turn.teacherPcm = await teacherTTS(turn.spokenText || a.spoken_feedback_zh, a._lang);
+          if (browser || !text) return null;
+          turn.teacherPcm = await teacherTTS(text, a?._lang);
           return { pcm: turn.teacherPcm, rate: 24000 };
         },
-        () => speakBrowser(turn.spokenText || a.spoken_feedback_zh, this.speechLangOf(turn))
+        text ? () => speakBrowser(text, this.speechLangOf(turn)) : undefined
       );
     }
   }
-
 }
 
+function sleep(ms) {
+  return new Promise((r) => setTimeout(r, ms));
+}
+
+const CJK_EDGE = /[　-鿿＀-￯]/;
 function joinText(a, b) {
   if (!a) return b.replace(/^\s+/, "");
   if (!b) return a;
   if (/\s$/.test(a) || /^[\s.,!?;:'’)]/.test(b)) return a + b;
+  // 中文与中文/中文标点之间不加空格
+  if (CJK_EDGE.test(a[a.length - 1]) || CJK_EDGE.test(b[0])) return a + b;
   return a + " " + b;
 }
 

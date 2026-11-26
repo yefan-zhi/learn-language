@@ -50,7 +50,17 @@ class ViewMissions extends HTMLElement {
                 <button data-val="off" class="${getSetting("stepMode") ? "" : "active"}">关</button>
               </div>
             </div>
-            <small class="opt-desc">开启后，每说完一句先看完老师点评，再点“下一句”继续；对话中也可以随时切换。</small>
+            <small class="opt-desc">开启后，每说完一句先看老师点评，点“下一句”后对方才回应，不满意可以“重说”；对话中也可以随时切换。</small>
+          </div>
+          <div class="opt">
+            <label>单模型模式</label>
+            <div class="opt-switch">
+              <div class="segmented" id="single-seg">
+                <button data-val="on" class="${getSetting("singleModelMode") ? "active" : ""}">开</button>
+                <button data-val="off" class="${getSetting("singleModelMode") ? "" : "active"}">关</button>
+              </div>
+            </div>
+            <small class="opt-desc">角色和老师由同一个实时模型担任，点评更快，但会共用一个声音（实验功能，下次开始对话时生效）。</small>
           </div>
           <div class="opt">
             <label>老师点评语言</label>
@@ -80,6 +90,13 @@ class ViewMissions extends HTMLElement {
       if (!b) return;
       this.querySelectorAll("#tlang-seg button").forEach((x) => x.classList.toggle("active", x === b));
       setSetting("teacherLanguage", b.dataset.val);
+    });
+
+    this.querySelector("#single-seg").addEventListener("click", (e) => {
+      const b = e.target.closest("button");
+      if (!b) return;
+      this.querySelectorAll("#single-seg button").forEach((x) => x.classList.toggle("active", x === b));
+      setSetting("singleModelMode", b.dataset.val === "on");
     });
 
     this.querySelector("#step-seg").addEventListener("click", (e) => {

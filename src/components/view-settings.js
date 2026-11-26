@@ -76,6 +76,7 @@ class ViewSettings extends HTMLElement {
 
             <details class="advanced">
               <summary>高级设置（语音、音色、模型）</summary>
+              <label class="check"><input type="checkbox" id="singleModelMode" ${s.singleModelMode ? "checked" : ""}> 单模型模式（角色和老师由同一个实时模型担任，点评更快，但会共用一个声音）</label>
               <label class="check"><input type="checkbox" id="teacherVoiceOn" ${s.teacherVoiceOn ? "checked" : ""}> 老师每句话后用语音点评</label>
               <label class="field">
                 <span>老师点评语言</span>
@@ -260,6 +261,7 @@ class ViewSettings extends HTMLElement {
       setSetting("apiKey", $("apiKey").value.trim());
       setSetting("inviteCode", $("inviteCode").value.trim());
       setSetting("teacherVoiceOn", $("teacherVoiceOn").checked);
+      setSetting("singleModelMode", $("singleModelMode").checked);
       setSetting("teacherVoiceSource", $("teacherVoiceSource").value);
       setSetting("teacherSpeed", $("teacherSpeed").value);
       setSetting("teacherLanguage", $("teacherLanguage").value);
