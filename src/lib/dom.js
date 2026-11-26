@@ -28,3 +28,13 @@ export function feedbackHtml(a, { compact = false } = {}) {
     ${!compact ? `<div class="fb-row teacher-say"><span class="fb-label">老师说</span><span>${escapeHtml(a.spoken_feedback_zh)}</span></div>` : ""}
   `;
 }
+
+/** 弹窗打开时锁定页面滚动（支持多层弹窗计数） */
+let scrollLocks = 0;
+export function lockScroll() {
+  if (scrollLocks++ === 0) document.documentElement.classList.add("modal-open");
+}
+export function unlockScroll() {
+  scrollLocks = Math.max(0, scrollLocks - 1);
+  if (scrollLocks === 0) document.documentElement.classList.remove("modal-open");
+}

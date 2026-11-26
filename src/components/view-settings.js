@@ -4,7 +4,7 @@ import { getQuota, isUnlimited } from "../lib/relay.js";
 import { relayConfigured } from "../lib/config.js";
 import { listModels, pickModels } from "../lib/gemini-rest.js";
 import { setManual } from "../lib/models.js";
-import { escapeHtml } from "../lib/dom.js";
+import { escapeHtml, lockScroll, unlockScroll } from "../lib/dom.js";
 
 export function openSettings(opts = {}) {
   if (document.querySelector("view-settings")) return;
@@ -15,108 +15,109 @@ export function openSettings(opts = {}) {
 }
 
 class ViewSettings extends HTMLElement {
+  disconnectedCallback() {
+    unlockScroll();
+  }
+
   connectedCallback() {
+    lockScroll();
     const s = getSettings();
     const opt = (arr, cur) => arr.map((v) => `<option value="${v}" ${v === cur ? "selected" : ""}>${v}</option>`).join("");
     this.innerHTML = `
       <div class="modal-backdrop">
-        <div class="modal glass-panel" role="dialog" aria-label="设置">
+        <div class="modal glass-panel" role="dialog" aria-modal="true" aria-label="设置">
           <div class="modal-head">
             <h3>⚙️ 设置</h3>
             <button class="icon-btn" id="close" aria-label="关闭">✕</button>
           </div>
-          <h4>🔑 接入方式</h4>
-          <div class="segmented" id="auth-tabs">
-            <button data-tab="invite" type="button">邀请码（用站长的额度）</button>
-            <button data-tab="key" type="button">自己的 API Key</button>
-          </div>
-          <small class="opt-desc">同时填了两种时，优先使用自己的 Key。当前：<b id="auth-now"></b></small>
 
-          <div id="panel-invite">
-            <label class="field">
-              <span>邀请码</span>
-              <div class="row">
-                <input id="inviteCode" type="text" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="朋友给你的邀请码" value="${escapeHtml(s.inviteCode)}">
-                <button class="small-btn primary" id="check-invite" type="button">验证</button>
+          <div class="modal-body">
+            <div class="segmented" id="auth-tabs">
+              <button data-tab="invite" type="button">🎟️ 邀请码</button>
+              <button data-tab="key" type="button">🔑 自己的 Key</button>
+            </div>
+            <small class="opt-desc">当前使用：<b id="auth-now"></b>（两种都填时优先用自己的 Key）</small>
+
+            <div id="panel-invite">
+              <label class="field">
+                <span>邀请码</span>
+                <div class="row">
+                  <input id="inviteCode" type="text" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="朋友给你的邀请码" value="${escapeHtml(s.inviteCode)}">
+                  <button class="small-btn primary" id="check-invite" type="button">验证</button>
+                </div>
+                ${relayConfigured() ? "" : `<small>⚠️ 中转服务未部署，邀请码暂不可用。</small>`}
+              </label>
+              <p class="status-line" id="invite-status"></p>
+            </div>
+
+            <div id="panel-key">
+              <label class="field">
+                <span>Gemini API Key</span>
+                <div class="row">
+                  <input id="apiKey" type="password" autocomplete="off" spellcheck="false" placeholder="AIza..." value="${escapeHtml(s.apiKey)}">
+                  <button class="small-btn" id="toggle-key" type="button">显示</button>
+                </div>
+                <small><a href="https://aistudio.google.com/apikey" target="_blank" rel="noopener">在 Google AI Studio 免费获取 →</a></small>
+              </label>
+              <div class="row gap">
+                <button class="small-btn primary" id="test" type="button">测试 Key</button>
+                <button class="small-btn danger" id="clear-key" type="button">清除 Key</button>
               </div>
-              <small>${relayConfigured() ? "使用站长提供的额度（每台设备每天有分钟数上限）。" : "⚠️ 站长还没有部署中转服务，邀请码暂时不可用。"}</small>
-            </label>
-            <p class="status-line" id="invite-status"></p>
-          </div>
-
-          <div id="panel-key">
-          ${this.firstRun ? `<p class="note">本工具直接在你的浏览器里调用 Google Gemini，需要你自己的 API Key（在 Google AI Studio 免费申请，有免费额度）。</p>` : ""}
-
-          <label class="field">
-            <span>Gemini API Key</span>
-            <div class="row">
-              <input id="apiKey" type="password" autocomplete="off" spellcheck="false" placeholder="AIza..." value="${escapeHtml(s.apiKey)}">
-              <button class="small-btn" id="toggle-key" type="button">显示</button>
+              <p class="status-line" id="test-status"></p>
+              <details class="security">
+                <summary>🔒 Key 只存在本机浏览器 · 了解更多</summary>
+                <ul>
+                  <li>Key 保存在这台设备的浏览器里，只发给 Google API，不经过第三方服务器。</li>
+                  <li>建议在 <a href="https://console.cloud.google.com/apis/credentials" target="_blank" rel="noopener">Google Cloud → 凭据</a> 把 Key 限制为网站 <code>https://yefan-zhi.github.io/*</code>，API 限制为 Generative Language API。</li>
+                  <li>在公用电脑上用完记得点“清除 Key”。</li>
+                </ul>
+              </details>
             </div>
-            <small><a href="https://aistudio.google.com/apikey" target="_blank" rel="noopener">→ 在 Google AI Studio 获取 API Key</a></small>
-          </label>
-          <div class="row gap">
-            <button class="small-btn primary" id="test">测试 Key 并检测可用模型</button>
+
+            <details class="advanced">
+              <summary>高级设置（语音、音色、模型）</summary>
+              <label class="check"><input type="checkbox" id="teacherVoiceOn" ${s.teacherVoiceOn ? "checked" : ""}> 老师每句话后用中文语音点评</label>
+              <label class="field">
+                <span>老师声音来源</span>
+                <select id="teacherVoiceSource">
+                  <option value="gemini" ${s.teacherVoiceSource === "gemini" ? "selected" : ""}>Gemini 语音（更自然，稍慢）</option>
+                  <option value="browser" ${s.teacherVoiceSource === "browser" ? "selected" : ""}>设备自带语音（更快）</option>
+                </select>
+              </label>
+              <label class="field">
+                <span>老师音色（Gemini）</span>
+                <select id="teacherVoice">${opt(TTS_VOICES, s.teacherVoice)}</select>
+              </label>
+              <label class="field">
+                <span>角色音色</span>
+                <select id="characterVoice">${opt(LIVE_VOICES, s.characterVoice)}</select>
+              </label>
+              <label class="field">
+                <span>实时对话模型（Live API）</span>
+                <input id="liveModel" list="live-models" value="${escapeHtml(s.liveModel)}" spellcheck="false">
+                <datalist id="live-models"></datalist>
+              </label>
+              <label class="field">
+                <span>老师分析模型</span>
+                <input id="teacherModel" list="text-models" value="${escapeHtml(s.teacherModel)}" spellcheck="false">
+                <datalist id="text-models"></datalist>
+              </label>
+              <label class="field">
+                <span>语音合成模型（TTS）</span>
+                <input id="ttsModel" list="tts-models" value="${escapeHtml(s.ttsModel)}" spellcheck="false">
+                <datalist id="tts-models"></datalist>
+              </label>
+              <div class="row gap wrap">
+                <button class="small-btn" id="reset-models" type="button">恢复默认模型</button>
+                <button class="small-btn" id="detect-invite" type="button">检测可用模型</button>
+              </div>
+              <p class="status-line" id="detect-status"></p>
+            </details>
           </div>
-          <p class="status-line" id="test-status"></p>
-
-          <details class="security">
-            <summary>🔒 Key 安全说明（建议看一下）</summary>
-            <ul>
-              <li>Key 只保存在<b>这台设备的浏览器</b>里（localStorage），只会发送给 Google 的 API，不经过任何第三方服务器。</li>
-              <li>建议在 <a href="https://console.cloud.google.com/apis/credentials" target="_blank" rel="noopener">Google Cloud 控制台 → 凭据</a> 里给这个 Key 加上“应用限制 → 网站（HTTP referrer）”，只允许 <code>https://yefan-zhi.github.io/*</code>，并把 API 限制为 Generative Language API。这样即使 Key 泄露也难以被滥用。</li>
-              <li>在公用电脑上用完后，可以点下面的“清除 Key”。</li>
-            </ul>
-          </details>
-          </div>
-
-          <h4>🧑‍🏫 老师点评</h4>
-          <label class="check"><input type="checkbox" id="teacherVoiceOn" ${s.teacherVoiceOn ? "checked" : ""}> 每句话后用中文语音点评（关闭后只显示文字）</label>
-          <label class="field">
-            <span>老师声音来源</span>
-            <select id="teacherVoiceSource">
-              <option value="gemini" ${s.teacherVoiceSource === "gemini" ? "selected" : ""}>Gemini 语音（更自然，稍慢）</option>
-              <option value="browser" ${s.teacherVoiceSource === "browser" ? "selected" : ""}>设备自带语音（更快、免费）</option>
-            </select>
-          </label>
-          <label class="field">
-            <span>老师音色（Gemini）</span>
-            <select id="teacherVoice">${opt(TTS_VOICES, s.teacherVoice)}</select>
-          </label>
-
-          <h4>🎭 对话角色</h4>
-          <label class="field">
-            <span>角色音色</span>
-            <select id="characterVoice">${opt(LIVE_VOICES, s.characterVoice)}</select>
-          </label>
-
-          <details class="advanced">
-            <summary>高级：模型选择</summary>
-            <label class="field">
-              <span>实时对话模型（Live API）</span>
-              <input id="liveModel" list="live-models" value="${escapeHtml(s.liveModel)}" spellcheck="false">
-              <datalist id="live-models"></datalist>
-            </label>
-            <label class="field">
-              <span>老师分析模型（需支持音频输入）</span>
-              <input id="teacherModel" list="text-models" value="${escapeHtml(s.teacherModel)}" spellcheck="false">
-              <datalist id="text-models"></datalist>
-            </label>
-            <label class="field">
-              <span>语音合成模型（TTS）</span>
-              <input id="ttsModel" list="tts-models" value="${escapeHtml(s.ttsModel)}" spellcheck="false">
-              <datalist id="tts-models"></datalist>
-            </label>
-            <div class="row gap">
-              <button class="small-btn" id="reset-models" type="button">恢复默认模型</button>
-              <button class="small-btn" id="detect-invite" type="button">通过邀请码检测模型</button>
-            </div>
-            <p class="status-line" id="detect-status"></p>
-          </details>
 
           <div class="modal-foot">
-            <button class="small-btn danger" id="clear-key" type="button">清除 Key</button>
-            <button class="small-btn primary" id="save">保存</button>
+            <button class="small-btn" id="cancel" type="button">取消</button>
+            <button class="small-btn primary" id="save" type="button">保存</button>
           </div>
         </div>
       </div>
@@ -124,6 +125,7 @@ class ViewSettings extends HTMLElement {
 
     const $ = (id) => this.querySelector(`#${id}`);
     const close = () => this.remove();
+    $("cancel").onclick = close;
 
     // 接入方式切换
     const modeLabel = { key: "自己的 API Key", invite: "邀请码", null: "未设置" };
@@ -222,10 +224,12 @@ class ViewSettings extends HTMLElement {
     };
 
     $("detect-invite").onclick = () => {
+      const key = $("apiKey").value.trim();
       const code = $("inviteCode").value.trim();
       const st = $("detect-status");
+      if (key) return detect(key, st);
       if (!code) {
-        st.textContent = "请先在上面填入邀请码";
+        st.textContent = "请先填入邀请码或 API Key";
         return;
       }
       setSetting("inviteCode", code);

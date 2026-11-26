@@ -2,7 +2,7 @@
 import { setSetting, getSetting } from "../lib/settings.js";
 import { getQuota, isUnlimited } from "../lib/relay.js";
 import { openSettings } from "./view-settings.js";
-import { escapeHtml } from "../lib/dom.js";
+import { escapeHtml, lockScroll, unlockScroll } from "../lib/dom.js";
 
 export function openInvite() {
   if (document.querySelector("view-invite") || document.querySelector("view-settings")) return;
@@ -10,7 +10,12 @@ export function openInvite() {
 }
 
 class ViewInvite extends HTMLElement {
+  disconnectedCallback() {
+    unlockScroll();
+  }
+
   connectedCallback() {
+    lockScroll();
     this.innerHTML = `
       <div class="modal-backdrop">
         <div class="modal glass-panel invite-modal" role="dialog" aria-label="输入邀请码">
@@ -18,6 +23,7 @@ class ViewInvite extends HTMLElement {
             <h3>🎟️ 输入邀请码</h3>
             <button class="icon-btn" id="close" aria-label="关闭">✕</button>
           </div>
+          <div class="modal-body">
           <p class="note">朋友给你的邀请码，相当于进门密码。输入后就能直接开始练习，不需要自己申请 API Key。</p>
           <label class="field">
             <span>邀请码</span>
@@ -28,6 +34,7 @@ class ViewInvite extends HTMLElement {
           </label>
           <p class="status-line" id="status"></p>
           <p class="hint invite-alt">我有自己的 Gemini API Key？<a href="#" id="own-key">用自己的 Key →</a></p>
+          </div>
         </div>
       </div>
     `;
