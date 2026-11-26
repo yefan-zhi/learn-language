@@ -11,6 +11,7 @@ import { getSetting, setSetting, ACCENTS, LEVELS, authMode } from "../lib/settin
 import { startRelaySession, reportUsage } from "../lib/relay.js";
 import { analyzeTurn, teacherTTS, nativeTTS, wordTTS, speakBrowser, stopBrowserSpeech, unlockBrowserSpeech } from "../lib/teacher.js";
 import { escapeHtml, feedbackHtml } from "../lib/dom.js";
+import { acquireMic, reacquireMic, watchAudioLifecycle } from "../lib/mic-permission.js";
 
 const SESSION_LIMIT_SEC = 15 * 60; // Live API 纯音频会话上限约 15 分钟
 const RING_SAMPLES = 16000 * 3;
@@ -379,9 +380,17 @@ class ViewChat extends HTMLElement {
       this.player = new AudioPlayer();
       const playerInit = this.player.init();
       this.streamer = new AudioStreamer();
+      this.streamer.prepareContext();
+      // 麦克风权限：必要时弹出说明/引导框，在按钮点击里同步申请（iOS）
+      const micStream = await acquireMic({ onGesture: () => this.unlockAudio() });
       await playerInit;
-      await this.streamer.start();
+      await this.streamer.start(micStream);
       this.streamer.onChunk = (pcm) => this.onMicChunk(pcm);
+      this.lifecycle = watchAudioLifecycle({
+        getContexts: () => [this.player?.audioContext, this.streamer?.audioContext],
+        getStream: () => this.streamer?.mediaStream,
+        onTrackEnded: () => this.onMicEnded(),
+      });
       this.player.onDrained = () => this.pumpTeacher();
 
       this.$("user-viz").connect(this.streamer.audioContext, this.streamer.source);
@@ -429,7 +438,8 @@ class ViewChat extends HTMLElement {
       btn.disabled = false;
       btn.textContent = "重试";
       let msg = err.message || String(err);
-      if (err.name === "NotAllowedError") msg = "没有麦克风权限，请在浏览器设置里允许本网站使用麦克风。";
+      if (err.name === "MicCancelled") msg = "需要麦克风才能开始练习，点“重试”再试一次。";
+      else if (err.name === "NotAllowedError") msg = "没有麦克风权限，请在浏览器设置里允许本网站使用麦克风。";
       else if (err.name === "NotFoundError") msg = "没有找到麦克风设备。";
       this.setStatus(`❌ ${msg}`, "var(--color-danger)");
     }
@@ -540,9 +550,52 @@ Continue seamlessly from exactly this point. Do NOT greet again, do NOT restart 
     this.pumpTeacher();
   }
 
+  /** 在用户手势里调用：解锁/恢复播放与采集的音频（iOS） */
+  unlockAudio() {
+    unlockBrowserSpeech();
+    try { this.streamer?.prepareContext(); } catch {}
+    this.player?.resume();
+  }
+
+  /** 麦克风轨道被系统中断（来电、切后台等）：弹窗一键恢复 */
+  async onMicEnded() {
+    if (this.state !== "active" || this._restoringMic) return;
+    this._restoringMic = true;
+    this.setStatus("⚠️ 麦克风断开了", "var(--color-danger)");
+    const next = new AudioStreamer();
+    try {
+      const stream = await reacquireMic({
+        onGesture: () => {
+          next.prepareContext();
+          this.unlockAudio();
+        },
+      });
+      if (this.state !== "active") {
+        stream.getTracks().forEach((t) => t.stop());
+        next.stop();
+        return;
+      }
+      try { this.$("user-viz")?.disconnect(); } catch {}
+      this.streamer?.stop();
+      this.streamer = next;
+      await next.start(stream);
+      next.onChunk = (pcm) => this.onMicChunk(pcm);
+      this.$("user-viz").connect(next.audioContext, next.source);
+      this.lifecycle?.rebind();
+      this.setStatus("🎙️ 麦克风已恢复，可以继续说", "var(--color-success)");
+    } catch (e) {
+      next.stop();
+      if (e.name === "MicCancelled") this.setStatus("⚠️ 麦克风已断开，点“结束”查看总结，或重新开始", "var(--color-danger)");
+    } finally {
+      this._restoringMic = false;
+    }
+  }
+
   stopAudio() {
     clearInterval(this.timer);
     this.timer = null;
+    this.lifecycle?.stop();
+    this.lifecycle = null;
     try { this.$("user-viz")?.disconnect(); } catch {}
     try { this.$("model-viz")?.disconnect(); } catch {}
     if (this.streamer) this.streamer.stop();

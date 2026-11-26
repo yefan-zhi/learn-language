@@ -21,22 +21,34 @@ export class AudioStreamer {
     this.onChunk = () => {};
   }
 
-  async start() {
+  /** 在用户手势里同步调用：提前创建并 resume 采集用的 AudioContext（iOS 需要） */
+  prepareContext() {
     // 注意：不要给 AudioContext 指定 sampleRate，Firefox/Safari 下麦克风会失败
-    const Ctx = window.AudioContext || window.webkitAudioContext;
-    this.audioContext = new Ctx();
+    if (!this.audioContext) {
+      const Ctx = window.AudioContext || window.webkitAudioContext;
+      this.audioContext = new Ctx();
+    }
+    if (this.audioContext.state === "suspended") this.audioContext.resume().catch(() => {});
+    return this.audioContext;
+  }
+
+  /** @param {MediaStream} [stream] 已经申请到的麦克风流；不传则在这里申请 */
+  async start(stream) {
+    this.prepareContext();
     if (this.audioContext.state === "suspended") {
       try { await this.audioContext.resume(); } catch {}
     }
 
-    this.mediaStream = await navigator.mediaDevices.getUserMedia({
-      audio: {
-        echoCancellation: true,
-        noiseSuppression: true,
-        autoGainControl: true,
-        channelCount: 1,
-      },
-    });
+    this.mediaStream =
+      stream ||
+      (await navigator.mediaDevices.getUserMedia({
+        audio: {
+          echoCancellation: true,
+          noiseSuppression: true,
+          autoGainControl: true,
+          channelCount: 1,
+        },
+      }));
 
     await this.audioContext.audioWorklet.addModule(
       `${BASE}audio-processors/capture.worklet.js`

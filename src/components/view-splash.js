@@ -1,3 +1,4 @@
+import { detectBrowser } from "../lib/mic-permission.js";
 import { authMode, hasAccess } from "../lib/settings.js";
 import { openSettings } from "./view-settings.js";
 import { openInvite } from "./view-invite.js";
@@ -22,6 +23,7 @@ class ViewSplash extends HTMLElement {
 
         <button class="cta-btn" id="start">开始练习</button>
         <p class="hint" id="key-hint"></p>
+        ${detectBrowser().isIPhone ? `<p class="hint">🎧 建议戴耳机，效果更好</p>` : ""}
       </div>
     `;
     const hint = this.querySelector("#key-hint");

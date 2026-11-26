@@ -513,3 +513,13 @@ details *, details *::before, details *::after { box-sizing: border-box; }
 .ipa { margin-left: 4px; color: var(--color-text-sub); font-family: "Lucida Sans Unicode", "Arial Unicode MS", "Noto Sans", sans-serif; font-size: .9em; }
 .play-mini.playing { background: var(--color-accent-primary); }
 .tc-actions { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+
+/* 麦克风权限弹窗 */
+.mic-modal { max-width: 460px; }
+.mic-modal .modal-body p { color: var(--color-text-main); margin: 6px 0; }
+.mic-modal .muted { color: var(--color-text-sub); font-size: .9rem; }
+.mic-steps { margin: 8px 0; padding-left: 1.3em; line-height: 1.6; }
+.mic-steps li { margin-bottom: 6px; }
+.mic-err { font-size: .78rem; color: var(--color-text-sub); word-break: break-all; }
+.mic-tip { background: var(--color-accent-glow); border-radius: 10px; padding: 8px 10px; font-size: .9rem; }
+.mic-modal .modal-foot { flex-wrap: wrap; }
