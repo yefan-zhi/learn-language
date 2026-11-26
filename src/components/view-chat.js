@@ -3,6 +3,8 @@
  */
 import "./audio-visualizer.js";
 import { LiveSession } from "../lib/gemini-live/geminilive.js";
+import { isModelGoneError, replaceModel } from "../lib/models.js";
+import { listModels } from "../lib/gemini-rest.js";
 import { AudioStreamer, AudioPlayer } from "../lib/gemini-live/mediaUtils.js";
 import { concatInt16, trimSilence, formatDuration } from "../lib/audio-utils.js";
 import { getSetting, setSetting, ACCENTS, LEVELS, authMode } from "../lib/settings.js";
@@ -203,57 +205,33 @@ class ViewChat extends HTMLElement {
         this.sessionLimitSec = Math.min(SESSION_LIMIT_SEC, relay.grantedMinutes * 60);
       }
 
-      const live = new LiveSession({
-        apiKey: relay ? undefined : getSetting("apiKey"),
-        url: relay ? relay.wsUrl : undefined,
-        model: getSetting("liveModel"),
-        voiceName: getSetting("characterVoice"),
-        systemInstruction: buildSystemInstruction(cfg),
-        functionDeclarations: cfg.mission.custom
-          ? []
-          : [
-              {
-                name: "complete_mission",
-                description: "Call this when the learner has successfully achieved the mission goal.",
-                parameters: {
-                  type: "OBJECT",
-                  properties: { note: { type: "STRING", description: "One short sentence about how the learner did." } },
-                },
-              },
-            ],
-      });
-      this.live = live;
-      live.onAudio = (pcm) => {
-        this.onModelOutput();
-        this.player.play(pcm);
-      };
-      live.onOutputTranscript = (t) => {
-        this.onModelOutput();
-        this.appendModelText(t);
-      };
-      live.onInputTranscript = (t) => this.onInputText(t);
-      live.onTurnComplete = () => this.onModelTurnEnd(false);
-      live.onInterrupted = () => this.onModelTurnEnd(true);
-      live.onToolCall = (calls) => this.onToolCall(calls);
-      live.onGoAway = () => {
-        this.setStatus("连接即将到期，正在结束本次练习…", "var(--color-accent-secondary)");
-        setTimeout(() => this.state === "active" && this.endSession(), 3000);
-      };
-      live.onClose = (info) => {
-        if (info.byUser || this.state !== "active") return;
-        this.state = "ended-unexpectedly";
-        this.finishRelay();
-        this.stopAudio();
-        this.setStatus(`⚠️ ${info.message}`, "var(--color-danger)");
-        const b = this.$("main-btn");
-        if (b) {
-          b.disabled = false;
-          b.textContent = this.session.turns.length ? "查看总结" : "返回";
-          if (!this.session.turns.length) b.onclick = () => this.onBack();
+      // 连接；如果 Live 模型已停用，自动换成推荐模型再试一次
+      let live;
+      for (let attempt = 0; ; attempt++) {
+        live = this.buildLive(relay);
+        try {
+          await live.connect();
+          break;
+        } catch (e) {
+          const gone = e.reason && isModelGoneError({ message: e.reason });
+          if (attempt === 0 && gone) {
+            const failed = getSetting("liveModel");
+            const next = await replaceModel("live", failed, e.reason, listModels);
+            if (next) {
+              this.setStatus(`模型 ${failed} 已停用，正在换成 ${next}…`);
+              if (relay) {
+                // 一次性令牌已用掉：退回刚才预留的额度，重新申请
+                reportUsage(relay.sessionId, 0);
+                relay = await startRelaySession();
+                this.relaySession = relay;
+                this.relayReported = false;
+              }
+              continue;
+            }
+          }
+          throw e;
         }
-      };
-
-      await live.connect();
+      }
       this.state = "active";
       this.session.startedAt = Date.now();
       this.connectedAt = this.session.startedAt;
@@ -285,6 +263,61 @@ class ViewChat extends HTMLElement {
       else if (err.name === "NotFoundError") msg = "没有找到麦克风设备。";
       this.setStatus(`❌ ${msg}`, "var(--color-danger)");
     }
+  }
+
+  /** 创建 LiveSession 并挂好回调（不连接） */
+  buildLive(relay) {
+    const cfg = this._cfg;
+    const live = new LiveSession({
+      apiKey: relay ? undefined : getSetting("apiKey"),
+      url: relay ? relay.wsUrl : undefined,
+      model: getSetting("liveModel"),
+      voiceName: getSetting("characterVoice"),
+      systemInstruction: buildSystemInstruction(cfg),
+      functionDeclarations: cfg.mission.custom
+        ? []
+        : [
+            {
+              name: "complete_mission",
+              description: "Call this when the learner has successfully achieved the mission goal.",
+              parameters: {
+                type: "OBJECT",
+                properties: { note: { type: "STRING", description: "One short sentence about how the learner did." } },
+              },
+            },
+          ],
+    });
+    this.live = live;
+    live.onAudio = (pcm) => {
+      this.onModelOutput();
+      this.player.play(pcm);
+    };
+    live.onOutputTranscript = (t) => {
+      this.onModelOutput();
+      this.appendModelText(t);
+    };
+    live.onInputTranscript = (t) => this.onInputText(t);
+    live.onTurnComplete = () => this.onModelTurnEnd(false);
+    live.onInterrupted = () => this.onModelTurnEnd(true);
+    live.onToolCall = (calls) => this.onToolCall(calls);
+    live.onGoAway = () => {
+      this.setStatus("连接即将到期，正在结束本次练习…", "var(--color-accent-secondary)");
+      setTimeout(() => this.state === "active" && this.endSession(), 3000);
+    };
+    live.onClose = (info) => {
+      if (info.byUser || this.state !== "active") return;
+      this.state = "ended-unexpectedly";
+      this.finishRelay();
+      this.stopAudio();
+      this.setStatus(`⚠️ ${info.message}`, "var(--color-danger)");
+      const b = this.$("main-btn");
+      if (b) {
+        b.disabled = false;
+        b.textContent = this.session.turns.length ? "查看总结" : "返回";
+        if (!this.session.turns.length) b.onclick = () => this.onBack();
+      }
+    };
+    return live;
   }
 
   tick() {

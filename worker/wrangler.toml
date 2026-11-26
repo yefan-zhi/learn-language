@@ -6,10 +6,11 @@ workers_dev = true
 # 不要把 GEMINI_API_KEY / INVITE_CODE 写在这里！用 `npx wrangler secret put` 设置。
 
 [vars]
-DEVICE_DAILY_MINUTES = "30"
-TOTAL_DAILY_MINUTES = "120"
+# 每日上限，"0" = 不限
+DEVICE_DAILY_MINUTES = "0"
+TOTAL_DAILY_MINUTES = "0"
 SESSION_MAX_MINUTES = "15"
-DEVICE_DAILY_REQUESTS = "400"
+DEVICE_DAILY_REQUESTS = "0"
 LIVE_API_VERSION = "v1beta"
 ALLOWED_ORIGINS = "https://yefan-zhi.github.io,http://localhost:5173,http://localhost:4173"
 

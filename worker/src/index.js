@@ -10,6 +10,9 @@
  *   开始会话时预留 grant 分钟（≤15，且不超过剩余额度），token 的 expireTime 也只给 grant+1 分钟；
  *   会话结束时客户端上报实际分钟数，Worker 把没用完的退回。
  *   客户端没上报（崩溃/关页面），预留的分钟就算用掉了（偏保守）。
+ *
+ * 任一每日上限设为 "0" 表示不限：对应的计数完全跳过 KV 读写。
+ * 全部不限时，会话不写 KV，sessionId 为 null（客户端也就不上报）。
  */
 
 const GEMINI = "https://generativelanguage.googleapis.com";
@@ -71,10 +74,10 @@ async function handleQuota(request, env) {
 async function handleSession(request, env) {
   const { deviceId } = await auth(request, env);
   const q = await quota(env, deviceId);
-  if (q.remainingMinutes < 1) {
-    throw new HttpError(429, "quota", q.deviceRemaining < 1 ? "你今天的练习额度已经用完了，明天再来吧～" : "今天大家的总额度已经用完了，明天再来吧～");
+  if (!q.unlimited && q.remainingMinutes < 1) {
+    throw new HttpError(429, "quota", q.deviceRemaining !== null && q.deviceRemaining < 1 ? "你今天的练习额度已经用完了，明天再来吧～" : "今天大家的总额度已经用完了，明天再来吧～");
   }
-  const grant = Math.min(sessionMax(env), q.remainingMinutes);
+  const grant = q.unlimited ? sessionMax(env) : Math.min(sessionMax(env), q.remainingMinutes);
   const now = Date.now();
 
   // 签发一次性 ephemeral token
@@ -95,14 +98,22 @@ async function handleSession(request, env) {
   const token = (await tokenRes.json()).name;
   if (!token) throw new HttpError(502, "upstream", "实时对话令牌为空");
 
-  // 预留分钟（3 次 KV 写入）
+  // 预留分钟（只对有上限的维度写 KV；全部不限时不写）
   const day = q.day;
-  const sessionId = crypto.randomUUID();
-  await Promise.all([
-    putInt(env, devKey(day, deviceId), q.deviceUsed + grant),
-    putInt(env, totKey(day), q.totalUsed + grant),
-    env.USAGE.put(`s:${sessionId}`, JSON.stringify({ d: deviceId, day, g: grant, t: now }), { expirationTtl: DAY_TTL }),
-  ]);
+  let sessionId = null;
+  if (q.deviceLimited || q.totalLimited) {
+    sessionId = crypto.randomUUID();
+    const writes = [
+      env.USAGE.put(
+        `s:${sessionId}`,
+        JSON.stringify({ d: deviceId, day, g: grant, t: now, dl: q.deviceLimited, tl: q.totalLimited }),
+        { expirationTtl: DAY_TTL }
+      ),
+    ];
+    if (q.deviceLimited) writes.push(putInt(env, devKey(day, deviceId), q.deviceUsed + grant));
+    if (q.totalLimited) writes.push(putInt(env, totKey(day), q.totalUsed + grant));
+    await Promise.all(writes);
+  }
 
   const ver = env.LIVE_API_VERSION || "v1beta";
   return json({
@@ -110,7 +121,8 @@ async function handleSession(request, env) {
     wsUrl: `wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.${ver}.GenerativeService.BidiGenerateContentConstrained?access_token=${encodeURIComponent(token)}`,
     sessionId,
     grantedMinutes: grant,
-    remainingMinutes: q.remainingMinutes - grant,
+    unlimited: q.unlimited,
+    remainingMinutes: q.unlimited ? null : q.remainingMinutes - grant,
   });
 }
 
@@ -131,10 +143,17 @@ async function handleUsage(request, env) {
   const refund = s.g - used;
 
   const writes = [env.USAGE.delete(`s:${sessionId}`)];
+  const dl = s.dl !== false; // 旧记录没有标记时按“有上限”处理
+  const tl = s.tl !== false;
   if (refund > 0) {
-    const [d, t] = await Promise.all([getInt(env, devKey(s.day, deviceId)), getInt(env, totKey(s.day))]);
-    writes.push(putInt(env, devKey(s.day, deviceId), Math.max(0, d - refund)));
-    writes.push(putInt(env, totKey(s.day), Math.max(0, t - refund)));
+    if (dl) {
+      const d = await getInt(env, devKey(s.day, deviceId));
+      writes.push(putInt(env, devKey(s.day, deviceId), Math.max(0, d - refund)));
+    }
+    if (tl) {
+      const t = await getInt(env, totKey(s.day));
+      writes.push(putInt(env, totKey(s.day), Math.max(0, t - refund)));
+    }
   }
   await Promise.all(writes);
   return json({ ok: true, used, refunded: refund });
@@ -151,13 +170,14 @@ async function handleGenerate(request, env) {
 
   await rateLimit(env.GEN_LIMITER, deviceId, "请求太频繁了，请稍等几秒再试");
 
-  // 每设备每日请求数上限：概率计数（每 10 次请求平均写 1 次 KV）
-  const day = utcDay();
-  const rKey = `r:${day}:${deviceId}`;
-  const count = await getInt(env, rKey);
+  // 每设备每日请求数上限（"0" = 不限，跳过 KV）：概率计数（每 10 次请求平均写 1 次 KV）
   const limit = intVar(env.DEVICE_DAILY_REQUESTS, 400);
-  if (count >= limit) throw new HttpError(429, "quota", "你今天的点评次数已经用完了，明天再来吧～");
-  if (Math.random() < 0.1) await putInt(env, rKey, count + 10);
+  if (limit > 0) {
+    const rKey = `r:${utcDay()}:${deviceId}`;
+    const count = await getInt(env, rKey);
+    if (count >= limit) throw new HttpError(429, "quota", "你今天的点评次数已经用完了，明天再来吧～");
+    if (Math.random() < 0.1) await putInt(env, rKey, count + 10);
+  }
 
   const up = await fetch(`${base(env)}/v1beta/models/${model}:generateContent`, {
     method: "POST",
@@ -237,21 +257,32 @@ async function sha256(s) {
   return new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(s)));
 }
 
+/** 每日分钟额度。上限为 0 表示不限（不读 KV）；不限的维度 remaining 为 null */
 async function quota(env, deviceId) {
   const day = utcDay();
-  const [deviceUsed, totalUsed] = await Promise.all([getInt(env, devKey(day, deviceId)), getInt(env, totKey(day))]);
   const devLimit = intVar(env.DEVICE_DAILY_MINUTES, 30);
   const totLimit = intVar(env.TOTAL_DAILY_MINUTES, 120);
-  const deviceRemaining = Math.max(0, devLimit - deviceUsed);
-  const totalRemaining = Math.max(0, totLimit - totalUsed);
+  const deviceLimited = devLimit > 0;
+  const totalLimited = totLimit > 0;
+  const [deviceUsed, totalUsed] = await Promise.all([
+    deviceLimited ? getInt(env, devKey(day, deviceId)) : 0,
+    totalLimited ? getInt(env, totKey(day)) : 0,
+  ]);
+  const deviceRemaining = deviceLimited ? Math.max(0, devLimit - deviceUsed) : null;
+  const totalRemaining = totalLimited ? Math.max(0, totLimit - totalUsed) : null;
+  const limited = [deviceRemaining, totalRemaining].filter((v) => v !== null);
+  const unlimited = limited.length === 0;
   return {
     day,
+    unlimited,
+    deviceLimited,
+    totalLimited,
     deviceUsed,
     totalUsed,
     deviceRemaining,
     totalRemaining,
-    remainingMinutes: Math.min(deviceRemaining, totalRemaining),
-    deviceDailyMinutes: devLimit,
+    remainingMinutes: unlimited ? null : Math.min(...limited),
+    deviceDailyMinutes: deviceLimited ? devLimit : null,
   };
 }
 

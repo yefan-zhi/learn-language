@@ -1,8 +1,9 @@
 // 设置弹窗
 import { getSettings, setSetting, LIVE_VOICES, TTS_VOICES, DEFAULTS, authMode } from "../lib/settings.js";
-import { getQuota } from "../lib/relay.js";
+import { getQuota, isUnlimited } from "../lib/relay.js";
 import { relayConfigured } from "../lib/config.js";
 import { listModels, pickModels } from "../lib/gemini-rest.js";
+import { setManual } from "../lib/models.js";
 import { escapeHtml } from "../lib/dom.js";
 
 export function openSettings(opts = {}) {
@@ -151,7 +152,9 @@ class ViewSettings extends HTMLElement {
       st.textContent = "验证中…";
       try {
         const q = await getQuota(code);
-        st.textContent = `✅ 邀请码有效，今天还可以练习 ${q.remainingMinutes} 分钟。别忘了点“保存”。`;
+        st.textContent = isUnlimited(q)
+          ? "✅ 邀请码有效。别忘了点“保存”。"
+          : `✅ 邀请码有效，今天还可以练习 ${q.remainingMinutes} 分钟。别忘了点“保存”。`;
       } catch (e) {
         st.textContent = `❌ ${e.message}`;
       }
@@ -169,6 +172,7 @@ class ViewSettings extends HTMLElement {
       $("liveModel").value = DEFAULTS.liveModel;
       $("teacherModel").value = DEFAULTS.teacherModel;
       $("ttsModel").value = DEFAULTS.ttsModel;
+      ["live", "text", "tts"].forEach((k) => setManual(k, false)); // 恢复自动选择
     };
     $("clear-key").onclick = () => {
       if (!confirm("确定清除本设备上保存的 API Key 吗？")) return;
@@ -235,9 +239,12 @@ class ViewSettings extends HTMLElement {
       setSetting("teacherVoiceSource", $("teacherVoiceSource").value);
       setSetting("teacherVoice", $("teacherVoice").value);
       setSetting("characterVoice", $("characterVoice").value);
-      setSetting("liveModel", $("liveModel").value.trim() || DEFAULTS.liveModel);
-      setSetting("teacherModel", $("teacherModel").value.trim() || DEFAULTS.teacherModel);
-      setSetting("ttsModel", $("ttsModel").value.trim() || DEFAULTS.ttsModel);
+      // 用户改动过的模型记为“手动指定”（自动选择不再覆盖，除非它确定不可用）
+      for (const [kind, id] of [["live", "liveModel"], ["text", "teacherModel"], ["tts", "ttsModel"]]) {
+        const v = $(id).value.trim() || DEFAULTS[id];
+        if (v !== s[id]) setManual(kind, v !== DEFAULTS[id]);
+        setSetting(id, v);
+      }
       close();
     };
   }

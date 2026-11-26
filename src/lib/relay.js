@@ -40,6 +40,11 @@ export function getQuota(invite) {
   return post("/api/quota", {}, invite);
 }
 
+/** 额度为不限时 remainingMinutes 为 null */
+export function isUnlimited(q) {
+  return !!q && (q.unlimited === true || q.remainingMinutes === null || q.remainingMinutes === undefined);
+}
+
 /** 开始一次实时对话：返回 { wsUrl, sessionId, grantedMinutes, remainingMinutes } */
 export function startRelaySession() {
   return post("/api/session", {});

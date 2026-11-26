@@ -9,7 +9,8 @@
     "build": "vite build",
     "preview": "vite preview",
     "worker:dev": "wrangler dev --config worker/wrangler.toml",
-    "worker:deploy": "wrangler deploy --config worker/wrangler.toml"
+    "worker:deploy": "wrangler deploy --config worker/wrangler.toml",
+    "secrets": "wrangler secret put GEMINI_API_KEY --config worker/wrangler.toml && wrangler secret put INVITE_CODE --config worker/wrangler.toml"
   },
   "devDependencies": {
     "vite": "^7.2.4",

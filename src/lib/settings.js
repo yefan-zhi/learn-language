@@ -3,9 +3,10 @@
 export const DEFAULTS = {
   apiKey: "",
   inviteCode: "",
-  liveModel: "gemini-2.5-flash-native-audio-preview-12-2025",
-  teacherModel: "gemini-2.5-flash",
-  ttsModel: "gemini-2.5-flash-preview-tts",
+  // 默认模型（2026-11）；启动时会自动检测并切换到可用的最新版本，见 lib/models.js
+  liveModel: "gemini-3.8-live",
+  teacherModel: "gemini-3.8-flash",
+  ttsModel: "gemini-3.8-flash-tts",
   characterVoice: "Puck",
   teacherVoice: "Kore",
   teacherVoiceSource: "gemini", // gemini | browser

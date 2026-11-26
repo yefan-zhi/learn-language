@@ -1,6 +1,7 @@
 // Gemini REST API（浏览器直连）
 import { getSetting, authMode } from "./settings.js";
 import { relayGenerate, relayModels } from "./relay.js";
+import { isModelGoneError, replaceModel, kindOfModel, pickModels as pick } from "./models.js";
 
 const BASE = "https://generativelanguage.googleapis.com/v1beta";
 
@@ -62,25 +63,62 @@ async function directRequest(path, { method, body, k }) {
   throw lastErr;
 }
 
-/** 根据模型系列加上合适的“思考”配置，追求低延迟 */
+/**
+ * 根据模型系列加上合适的“思考”配置，追求低延迟
+ * - 2.5 flash：thinkingBudget 0；2.5 pro：最小预算
+ * - 3.x：thinkingLevel "low"（3.8 Flash 支持 low/medium/high，不支持 minimal）
+ * - TTS / Live 不加
+ */
 export function thinkingFor(model) {
   const m = model.toLowerCase();
-  if (m.includes("tts")) return undefined;
-  if (m.includes("gemini-2.5-flash") || m.includes("gemini-2.5-flash-lite")) return { thinkingBudget: 0 };
+  if (/tts|live|native-audio/.test(m)) return undefined;
+  if (m.includes("gemini-2.5-flash")) return { thinkingBudget: 0 };
   if (m.includes("gemini-2.5-pro")) return { thinkingBudget: 128 };
-  if (/gemini-3/.test(m)) return { thinkingLevel: "low" };
+  if (/^gemini-[3-9]/.test(m)) return { thinkingLevel: "low" };
   return undefined;
 }
 
-export async function generateContent(model, body, opts = {}) {
-  const m = model.replace(/^models\//, "");
+async function rawGenerate(m, body, noThinking) {
   const gc = { ...(body.generationConfig || {}) };
   const t = thinkingFor(m);
-  if (t && !gc.thinkingConfig && !opts.noThinkingConfig) gc.thinkingConfig = t;
+  if (t && !gc.thinkingConfig && !noThinking) gc.thinkingConfig = t;
+  if (noThinking) delete gc.thinkingConfig;
   return request(`models/${m}:generateContent`, {
     method: "POST",
     body: { ...body, generationConfig: gc },
   });
+}
+
+/**
+ * generateContent，自带两层容错：
+ *  1. thinking 参数报错 → 去掉再试
+ *  2. 模型已停用/不存在 → 换成推荐模型（错误信息里的 models/xxx 或自动检测结果）重试一次，并记住
+ */
+export async function generateContent(model, body, opts = {}) {
+  let m = model.replace(/^models\//, "");
+  let noThinking = !!opts.noThinkingConfig;
+  let swapped = false;
+  for (let attempt = 0; attempt < 4; attempt++) {
+    try {
+      return await rawGenerate(m, body, noThinking);
+    } catch (e) {
+      if (!noThinking && e.status === 400 && /thinking/i.test(e.message || "")) {
+        noThinking = true;
+        continue;
+      }
+      if (!swapped && isModelGoneError(e)) {
+        swapped = true;
+        const next = await replaceModel(opts.kind || kindOfModel(m), m, e.message, listModels);
+        if (next) {
+          m = next;
+          noThinking = !!opts.noThinkingConfig;
+          continue;
+        }
+      }
+      throw e;
+    }
+  }
+  throw new Error("请求失败");
 }
 
 export function textOf(resp) {
@@ -104,15 +142,7 @@ export async function generateJSON(model, { system, parts, schema, temperature =
     },
   };
   if (system) body.systemInstruction = { parts: [{ text: system }] };
-  let resp;
-  try {
-    resp = await generateContent(model, body);
-  } catch (e) {
-    // 某些模型不接受 thinkingConfig，去掉再试
-    if (e.status === 400 && /thinking/i.test(e.message)) {
-      resp = await generateContent(model, body, { noThinkingConfig: true });
-    } else throw e;
-  }
+  const resp = await generateContent(model, body);
   const txt = textOf(resp);
   try {
     return JSON.parse(txt);
@@ -141,18 +171,5 @@ export async function listModels(apiKey) {
   }));
 }
 
-/** 从模型列表里挑出推荐的 live / teacher / tts 模型 */
-export function pickModels(models) {
-  const live = models.filter((m) => m.methods.includes("bidiGenerateContent"));
-  const nativeAudio = live.filter((m) => /native-audio/.test(m.name));
-  const text = models.filter(
-    (m) => m.methods.includes("generateContent") && /^gemini-/.test(m.name) && !/tts|image|embedding|live|audio|robotics|computer/.test(m.name)
-  );
-  const tts = models.filter((m) => /tts/.test(m.name) && m.methods.includes("generateContent"));
-  const newest = (arr) => [...arr].sort((a, b) => b.name.localeCompare(a.name, "en", { numeric: true }));
-  return {
-    live: newest(nativeAudio.length ? nativeAudio : live).map((m) => m.name),
-    text: newest(text).map((m) => m.name),
-    tts: newest(tts).map((m) => m.name),
-  };
-}
+/** 从模型列表里挑出推荐的 live / teacher / tts 模型（规则见 lib/models.js） */
+export const pickModels = pick;

@@ -1,6 +1,6 @@
 // 首次使用：输入邀请码（使用站长的额度）
 import { setSetting, getSetting } from "../lib/settings.js";
-import { getQuota } from "../lib/relay.js";
+import { getQuota, isUnlimited } from "../lib/relay.js";
 import { openSettings } from "./view-settings.js";
 import { escapeHtml } from "../lib/dom.js";
 
@@ -52,7 +52,7 @@ class ViewInvite extends HTMLElement {
         const q = await getQuota(code);
         setSetting("inviteCode", code);
         st.style.color = "var(--color-success)";
-        st.textContent = `✅ 邀请码有效，今天还可以练习 ${q.remainingMinutes} 分钟`;
+        st.textContent = isUnlimited(q) ? "✅ 邀请码有效" : `✅ 邀请码有效，今天还可以练习 ${q.remainingMinutes} 分钟`;
         setTimeout(close, 900);
       } catch (e) {
         st.style.color = "var(--color-danger)";

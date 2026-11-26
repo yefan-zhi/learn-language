@@ -67,7 +67,10 @@ export class LiveSession {
         this.connected = false;
         const reason = ev.reason || "";
         if (!settled) {
-          fail(new Error(explainClose(ev.code, reason)));
+          const err = new Error(explainClose(ev.code, reason));
+          err.code = ev.code;
+          err.reason = reason;
+          fail(err);
         }
         this.onClose({ code: ev.code, reason, message: explainClose(ev.code, reason), wasConnected, byUser: this.closedByUser });
       };

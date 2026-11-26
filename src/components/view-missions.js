@@ -4,7 +4,7 @@ import { escapeHtml } from "../lib/dom.js";
 import { openSettings } from "./view-settings.js";
 import { openInvite } from "./view-invite.js";
 import { relayConfigured } from "../lib/config.js";
-import { getQuota } from "../lib/relay.js";
+import { getQuota, isUnlimited } from "../lib/relay.js";
 
 const DIFF = {
   Easy: ["简单", "#8bc34a"],
@@ -76,6 +76,10 @@ class ViewMissions extends HTMLElement {
     if (!el || authMode() !== "invite") return;
     getQuota()
       .then((q) => {
+        if (isUnlimited(q)) {
+          el.hidden = true; // 不限额度时不显示
+          return;
+        }
         el.hidden = false;
         el.classList.toggle("empty", q.remainingMinutes < 1);
         el.textContent =

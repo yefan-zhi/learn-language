@@ -11,10 +11,10 @@
 
 | 变量 | 默认 | 说明 |
 | --- | --- | --- |
-| `DEVICE_DAILY_MINUTES` | 30 | 每台设备每天可练习的分钟数 |
-| `TOTAL_DAILY_MINUTES` | 120 | 全站每天的总分钟数（控制总花费） |
+| `DEVICE_DAILY_MINUTES` | 0（不限） | 每台设备每天可练习的分钟数；`"0"` = 不限 |
+| `TOTAL_DAILY_MINUTES` | 0（不限） | 全站每天的总分钟数（控制总花费）；`"0"` = 不限 |
 | `SESSION_MAX_MINUTES` | 15 | 单次练习上限（Live API 音频会话本身也约 15 分钟） |
-| `DEVICE_DAILY_REQUESTS` | 400 | 每台设备每天的点评/语音请求次数上限 |
+| `DEVICE_DAILY_REQUESTS` | 0（不限） | 每台设备每天的点评/语音请求次数上限；`"0"` = 不限 |
 
 日期按 **UTC** 计算，北京时间每天早上 8 点重置。
 
@@ -65,3 +65,9 @@ INVITE_CODE="test-code"
 ## 如果实时对话连不上
 
 临时令牌目前走 `v1beta` 的 `BidiGenerateContentConstrained` 接口。如果 Google 改了接口版本，把 `wrangler.toml` 里的 `LIVE_API_VERSION` 改成 `v1alpha` 再重新部署试试。
+
+### 不限额度（当前配置）
+
+三个每日上限都设为 `"0"` 时：不读写任何用量计数（不消耗 KV 写入额度），每次会话仍按 `SESSION_MAX_MINUTES`（15 分钟，Live API 单次上限）签发令牌；
+每分钟频率限制（`GEN_LIMITER`）和邀请码防爆破（`AUTH_LIMITER`）照常生效。想恢复限额，把对应值改成正数后 `npm run worker:deploy` 即可。
+建议在 Google Cloud 为这个 API Key 所在项目设置预算提醒。

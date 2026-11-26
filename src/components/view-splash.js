@@ -2,7 +2,7 @@ import { authMode, hasAccess } from "../lib/settings.js";
 import { openSettings } from "./view-settings.js";
 import { openInvite } from "./view-invite.js";
 import { relayConfigured } from "../lib/config.js";
-import { getQuota } from "../lib/relay.js";
+import { getQuota, isUnlimited } from "../lib/relay.js";
 
 class ViewSplash extends HTMLElement {
   connectedCallback() {
@@ -35,7 +35,7 @@ class ViewSplash extends HTMLElement {
         getQuota()
           .then((q) => {
             const el = this.querySelector("#quota");
-            if (el) el.textContent = `· 今天还可以练习 ${q.remainingMinutes} 分钟`;
+            if (el) el.textContent = isUnlimited(q) ? "" : `· 今天还可以练习 ${q.remainingMinutes} 分钟`;
           })
           .catch((e) => {
             const el = this.querySelector("#quota");
