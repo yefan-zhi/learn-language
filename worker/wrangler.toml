@@ -16,7 +16,7 @@ ALLOWED_ORIGINS = "https://yefan-zhi.github.io,http://localhost:5173,http://loca
 # 部署前：npx wrangler kv namespace create USAGE，然后把输出的 id 填到下面
 [[kv_namespaces]]
 binding = "USAGE"
-id = "REPLACE_WITH_KV_NAMESPACE_ID"
+id = "03cd807d3e544f2e951d5e00df6fe5b3"
 
 # 每设备每分钟最多 40 次点评请求（不占 KV 写入额度）
 [[ratelimits]]
