@@ -1,6 +1,7 @@
 // “老师”：每句点评、中文语音、地道说法朗读、会话总结
-import { generateJSON, generateContent, audioOf } from "./gemini-rest.js";
-import { getSetting, ACCENTS, LEVELS } from "./settings.js";
+import { generateJSON, generateContent, audioOf, streamJSON } from "./gemini-rest.js";
+import { teacherModelFor } from "./models.js";
+import { getSetting, ACCENTS, LEVELS, teacherLang } from "./settings.js";
 import { arrayBufferToBase64, int16ToWav, base64ToInt16 } from "./audio-utils.js";
 
 const FEEDBACK_SCHEMA = {
@@ -32,76 +33,150 @@ const FEEDBACK_SCHEMA = {
     "no_speech", "transcript", "rating", "natural", "better_expression",
     "expression_note_zh", "pronunciation", "intonation_zh", "spoken_feedback_zh",
   ],
+  // 流式输出时最先生成要朗读的点评和地道说法，语音可以更早开始
+  propertyOrdering: [
+    "no_speech", "spoken_feedback_zh", "better_expression", "natural", "rating",
+    "transcript", "expression_note_zh", "pronunciation", "intonation_zh",
+  ],
 };
 
-function teacherSystem(accentKey, level) {
+function teacherSystem(accentKey, level, langKey) {
   const a = ACCENTS[accentKey] || ACCENTS.us;
+  const L = teacherLang(langKey, accentKey);
+  const zh = L.key === "zh";
+  const lang = zh ? "中文" : `简单清楚的英文（${a.en}，短句、常用词，不要用中文）`;
   return `你是一位经验丰富、亲切又专业的英语口语老师。学生的母语是中文，正在练习${a.short}英语（${a.en}）口语，水平大约是${(LEVELS[level] || LEVELS.intermediate).label}。
 学生正在和一个英语母语者做情景角色扮演。你是旁听的第三方老师，在学生每说完一句话后给出点评。
 
 你会收到：学生刚说的这句话的录音、语音识别文本（可能不准）、以及对话上下文。请：
 1. 以录音为准，写出学生实际说了什么（transcript，保留语法错误，不要替学生改正）。
-2. 判断表达是否地道：${a.en} 的母语者在这个场景下会不会这样说？语法、用词、搭配、礼貌程度是否合适？给出更地道的说法 better_expression（符合${a.short}用词习惯，例如美式 apartment/subway/check，英式 flat/tube/bill）。如果原句已经很地道，natural=true，better_expression 给原句或略作润色。
-3. 仔细听发音：指出你确实清楚听到的单词发音问题（元音长短、th/v/w/l/r/n 等辅音、词尾辅音吞音或加多余元音、单词重音位置等），以 ${a.short}标准发音为参照。只说真实听到的问题，不要编造；没有就返回空数组；最多 3 个。每个问题的 word 只写一个英文单词（或固定短语），并在 ipa 里给出它的${a.short}标准 IPA 音标（${accentKey === "uk" ? "英式 RP，例如 /ˈkɒfi/" : "美式 General American，例如 /ˈkɑːfi/"}，带斜杠）。
-4. 语调：句子重音、疑问句升降调、意群停顿、连读和节奏是否自然，用中文简要说明（intonation_zh）。
-5. spoken_feedback_zh：用中文写一段会被朗读出来的点评，像老师当面说话：2~4 句，口语化、温和、具体。先简短肯定一个优点，再讲最重要的 1~2 个问题和怎么改（需要时直接说出英文单词或句子）。不要用 markdown、括号注释、列表或特殊符号。
+2. 判断表达是否地道：${a.en} 的母语者在这个场景下会不会这样说？语法、用词、搭配、礼貌程度是否合适？给出更地道的说法 better_expression（符合${a.short}用词习惯，例如美式 apartment/subway/check，英式 flat/tube/bill）。如果原句已经很地道，natural=true，better_expression 给原句或略作润色。expression_note_zh 用${lang}说明。
+3. 仔细听发音：指出你确实清楚听到的单词发音问题（元音长短、th/v/w/l/r/n 等辅音、词尾辅音吞音或加多余元音、单词重音位置等），以 ${a.short}标准发音为参照。只说真实听到的问题，不要编造；没有就返回空数组；最多 3 个。每个问题的 word 只写一个英文单词（或固定短语），并在 ipa 里给出它的${a.short}标准 IPA 音标（${accentKey === "uk" ? "英式 RP，例如 /ˈkɒfi/" : "美式 General American，例如 /ˈkɑːfi/"}，带斜杠）。problem_zh 和 tip_zh 用${lang}写。
+4. 语调：句子重音、疑问句升降调、意群停顿、连读和节奏是否自然，用${lang}简要说明（intonation_zh）。
+5. spoken_feedback_zh：用${lang}写一段会被朗读出来的点评，像老师当面说话：2~4 句，口语化、温和、具体。先简短肯定一个优点，再讲最重要的 1~2 个问题和怎么改${zh ? "（需要时直接说出英文单词或句子）" : ""}。不要用 markdown、括号注释、列表或特殊符号。
 6. rating：1~5 分综合评分（表达 + 发音 + 流利度）。
 如果录音里几乎听不到学生说英语（只有静音、噪音或别人的声音），设置 no_speech=true，其他字段可以留空。
-除 transcript 和 better_expression 外，所有说明一律用简体中文。`;
+语言要求：${L.instruction}（字段名带 _zh 只是历史命名，内容按这里的语言要求写。）transcript 和 better_expression 始终是英文。
+输出时按 JSON 字段顺序：先写 no_speech，再写 spoken_feedback_zh（先在心里听完整句再下结论），然后是其他字段；各字段内容要彼此一致。
+spoken_feedback_zh 只写老师要说的话本身，不要写“用…语气说：”“Say this…:”之类的朗读提示。`;
 }
 
-/**
- * 分析一句话
- * @param {object} p { pcm: Int16Array(16k), asrText, prevCharacterText, missionTitle, missionDesc, role, accent, level }
- */
-export async function analyzeTurn(p) {
-  const model = getSetting("teacherModel");
+function turnRequest(p) {
   const wav = int16ToWav(p.pcm, 16000);
+  p.lang = p.lang || teacherLang().key;
   const ctx = `场景：${p.missionTitle}（${p.missionDesc}）。对方角色：${p.role}。
 对方刚才说的话：${p.prevCharacterText ? `"${p.prevCharacterText}"` : "（无，学生先开口）"}
-学生这句话的语音识别文本（可能不准）："${p.asrText || ""}"
+学生这句话的语音识别文本（可能不准、可能不完整）："${p.asrText || ""}"
 下面是学生这句话的录音。`;
-  return generateJSON(model, {
-    system: teacherSystem(p.accent, p.level),
+  return {
+    system: teacherSystem(p.accent, p.level, p.lang),
     parts: [{ text: ctx }, { inlineData: { mimeType: "audio/wav", data: arrayBufferToBase64(wav) } }],
     schema: FEEDBACK_SCHEMA,
     temperature: 0.3,
-  });
+  };
 }
 
-/** 用 Gemini TTS 合成，返回 24kHz Int16 PCM */
-export async function geminiTTS(text, voiceName) {
+/**
+ * 分析一句话（非流式）
+ * @param {object} p { pcm: Int16Array(16k), asrText, prevCharacterText, missionTitle, missionDesc, role, accent, level }
+ */
+export async function analyzeTurn(p) {
+  const req = turnRequest(p);
+  const a = await generateJSON(teacherModelFor(getSetting), req);
+  return { ...a, _lang: p.lang };
+}
+
+/**
+ * 流式分析一句话：onPartial(部分结果, 原始文本) 边生成边回调；失败自动回退到非流式
+ * opts: { onPartial, onFirstToken, signal }
+ */
+export async function analyzeTurnStream(p, opts = {}) {
+  const req = turnRequest(p);
+  const onPartial = opts.onPartial ? (part, raw) => opts.onPartial({ ...part, _lang: p.lang }, raw) : undefined;
+  const a = await streamJSON(teacherModelFor(getSetting), req, { ...opts, onPartial });
+  return { ...a, _lang: p.lang };
+}
+
+/**
+ * 去掉误混进朗读文本的指令，比如 "Say this in an American accent: ..."、"用温和的语气朗读：..."
+ */
+export function cleanSpeechText(text) {
+  let t = String(text || "").trim();
+  for (let i = 0; i < 3; i++) {
+    const before = t;
+    t = t
+      .replace(/^\s*(?:please\s+)?(?:say|read|speak|pronounce|repeat)\b[^:：\n]{0,160}[:：]\s*/i, "")
+      .replace(/^\s*(?:in|with)\s+an?\s+[^:：\n]{0,80}(?:accent|voice|tone)[^:：\n]{0,60}[:：]\s*/i, "")
+      .replace(/^\s*(?:请)?(?:用|以|按)[^:：\n]{0,80}(?:语气|口吻|声音|语调|语速|发音|口音|方式)[^:：\n]{0,60}[:：]\s*/, "")
+      .replace(/^\s*(?:朗读|读出|念出)[^:：\n]{0,40}[:：]\s*/, "")
+      .trim();
+    if (t === before) break;
+  }
+  return t;
+}
+
+// TTS 风格提示放在 speechMetadata.style（不会被念出来）；接口不认这个字段时自动去掉并记住
+let styleUnsupported = (() => {
+  try { return localStorage.getItem("ll_ttsNoStyle") === "1"; } catch { return false; }
+})();
+
+/**
+ * 用 Gemini TTS 合成，返回 24kHz Int16 PCM。
+ * text 只能是要念的内容本身；风格放在 style 参数里。
+ */
+export async function geminiTTS(text, voiceName, style) {
   const model = getSetting("ttsModel");
-  const resp = await generateContent(model, {
-    contents: [{ role: "user", parts: [{ text }] }],
-    generationConfig: {
-      responseModalities: ["AUDIO"],
-      speechConfig: { voiceConfig: { prebuiltVoiceConfig: { voiceName } } },
-    },
-  });
+  const spoken = cleanSpeechText(text);
+  if (!spoken) throw new Error("没有要朗读的内容");
+  const call = (withStyle) => {
+    const part = { text: spoken };
+    if (withStyle && style) part.speechMetadata = { style };
+    return generateContent(model, {
+      contents: [{ role: "user", parts: [part] }],
+      generationConfig: {
+        responseModalities: ["AUDIO"],
+        speechConfig: { voiceConfig: { prebuiltVoiceConfig: { voiceName } } },
+      },
+    });
+  };
+  let resp;
+  if (style && !styleUnsupported) {
+    try {
+      resp = await call(true);
+    } catch (e) {
+      if (e.status === 400 && /speech_?metadata|unknown name|invalid json payload|cannot find field/i.test(e.message || "")) {
+        styleUnsupported = true;
+        try { localStorage.setItem("ll_ttsNoStyle", "1"); } catch {}
+        resp = await call(false);
+      } else throw e;
+    }
+  } else {
+    resp = await call(false);
+  }
   const a = audioOf(resp);
   if (!a) throw new Error("TTS 没有返回音频");
   return base64ToInt16(a.data);
 }
 
 /** 老师中文语音（Gemini） */
-export function teacherTTS(text) {
-  return geminiTTS(
-    `用温和、清晰、像老师当面指导学生一样的语气，语速适中地朗读下面这段中文点评，其中的英文单词和句子用标准英语发音读：\n${text}`,
-    getSetting("teacherVoice")
-  );
+export function teacherTTS(text, langKey) {
+  const L = teacherLang(langKey);
+  const style =
+    L.key === "en"
+      ? `warm, clear and encouraging, like a friendly teacher talking to a student, moderate pace, ${getSetting("accent") === "uk" ? "British" : "American"} accent`
+      : "warm, clear and encouraging, like a friendly teacher talking to a student, moderate pace, standard Mandarin";
+  return geminiTTS(text, getSetting("teacherVoice"), style);
 }
+
+const accentStyle = (accentKey) =>
+  accentKey === "uk" ? "standard southern British (RP) accent" : "General American accent";
 
 /** 地道说法（美/英口音） */
 const nativeCache = new Map();
 export function nativeTTS(text, accentKey) {
-  const a = ACCENTS[accentKey] || ACCENTS.us;
   const k = `${accentKey}|${text}`;
   if (!nativeCache.has(k)) {
-    const p = geminiTTS(
-      `Say this naturally and conversationally, with a ${accentKey === "uk" ? "standard southern British (London)" : "general American"} accent: ${text}`,
-      getSetting("characterVoice")
-    ).catch((e) => {
+    const p = geminiTTS(text, getSetting("characterVoice"), `natural and conversational, ${accentStyle(accentKey)}`).catch((e) => {
       nativeCache.delete(k);
       throw e;
     });
@@ -146,7 +221,8 @@ async function wordDbPut(k, pcm) {
 export const wordTTSStats = { requests: 0, memHits: 0, dbHits: 0 };
 export function wordTTS(word, accentKey) {
   const w = String(word || "").trim();
-  const k = `${accentKey === "uk" ? "uk" : "us"}|${w.toLowerCase()}`;
+  // v2：旧缓存里可能录进了朗读指令，换新 key 不再使用
+  const k = `v2|${accentKey === "uk" ? "uk" : "us"}|${w.toLowerCase()}`;
   if (wordMem.has(k)) {
     wordTTSStats.memHits++;
     return wordMem.get(k);
@@ -158,10 +234,11 @@ export function wordTTS(word, accentKey) {
       return cached;
     }
     wordTTSStats.requests++;
-    const accent = accentKey === "uk" ? "standard southern British (RP)" : "General American";
+    // 只发送要念的单词（念两遍）；“先慢后正常”的要求放在风格里，不会被念出来
     const pcm = await geminiTTS(
-      `Say this word clearly in a ${accent} accent, first slowly and carefully, then once more at normal speed, with a short pause in between: ${w} ... ${w}`,
-      getSetting("characterVoice")
+      `${w}. ... ${w}.`,
+      getSetting("characterVoice"),
+      `clear dictionary-style pronunciation, ${accentStyle(accentKey)}; first time slow and careful, second time at normal speed`
     );
     wordDbPut(k, pcm);
     return pcm;
@@ -198,26 +275,79 @@ export function unlockBrowserSpeech() {
   } catch {}
 }
 
-export async function speakBrowser(text, lang = "zh-CN", rate = 1.0) {
-  if (!("speechSynthesis" in window)) throw new Error("浏览器不支持语音合成");
+/** 给设备语音打分：越高越好 */
+function voiceScore(v, lang) {
+  const name = v.name || "";
+  const vl = (v.lang || "").replace("_", "-");
+  let sc = 0;
+  if (vl.toLowerCase() === lang.toLowerCase()) sc += 100;
+  else if (vl.slice(0, 2).toLowerCase() === lang.slice(0, 2).toLowerCase()) sc += 40;
+  else return -1;
+  if (/premium|enhanced|高品质|增强/i.test(name)) sc += 30;
+  if (/natural|neural|online/i.test(name)) sc += 25; // Edge 的 Xiaoxiao Online (Natural) 等
+  if (/google/i.test(name)) sc += 20;
+  if (lang.toLowerCase() === "zh-cn" && /ting-?ting|lili|xiaoxiao|yunxi|xiaoyi|普通话|mandarin/i.test(name)) sc += 15;
+  if (/meijia|mei-jia|sinji|粤|cantonese|台湾|taiwan|hong ?kong/i.test(name) && lang.toLowerCase() === "zh-cn") sc -= 20;
+  if (lang.toLowerCase() === "en-us" && /samantha|ava|allison|google us/i.test(name)) sc += 10;
+  if (lang.toLowerCase() === "en-gb" && /daniel|kate|serena|google uk/i.test(name)) sc += 10;
+  if (/compact|eloquence|novelty|bad news|bells|boing|bubbles|cellos|whisper|zarvox|trinoids|organ|jester|superstar/i.test(name)) sc -= 50;
+  if (v.localService) sc += 2;
+  return sc;
+}
+
+export async function pickBrowserVoice(lang) {
   const voices = await loadVoices();
-  const voice =
-    voices.find((v) => v.lang === lang && /premium|enhanced|natural|google/i.test(v.name)) ||
-    voices.find((v) => v.lang === lang) ||
-    voices.find((v) => v.lang && v.lang.startsWith(lang.slice(0, 2)));
+  let best = null;
+  let bestScore = -1;
+  for (const v of voices) {
+    const sc = voiceScore(v, lang);
+    if (sc > bestScore) {
+      bestScore = sc;
+      best = v;
+    }
+  }
+  return best;
+}
+
+let speakToken = 0;
+/**
+ * 设备语音朗读。长文本按句子切开依次朗读（避免 Chrome 长句中途停止），
+ * 调用 stopBrowserSpeech() 会中止剩下的句子。
+ * onStart：第一句真正开始时回调（用于计时）
+ */
+export async function speakBrowser(text, lang = "zh-CN", rate = 1.0, onStart) {
+  if (!("speechSynthesis" in window)) throw new Error("浏览器不支持语音合成");
+  const clean = cleanSpeechText(text);
+  if (!clean) return;
+  const voice = await pickBrowserVoice(lang);
   speechSynthesis.cancel();
-  return new Promise((resolve) => {
-    const u = new SpeechSynthesisUtterance(text);
-    u.lang = lang;
-    if (voice) u.voice = voice;
-    u.rate = rate;
-    u.onend = resolve;
-    u.onerror = resolve;
-    speechSynthesis.speak(u);
-  });
+  const token = ++speakToken;
+  const pieces = clean.match(/[^。！？!?；;\n]+[。！？!?；;]*|[\n]+/g)?.map((x) => x.trim()).filter(Boolean) || [clean];
+  let started = false;
+  for (const piece of pieces) {
+    if (token !== speakToken) return;
+    await new Promise((resolve) => {
+      const u = new SpeechSynthesisUtterance(piece);
+      u.lang = lang;
+      if (voice) u.voice = voice;
+      u.rate = rate;
+      u.onstart = () => {
+        if (!started) {
+          started = true;
+          onStart?.();
+        }
+      };
+      u.onend = resolve;
+      u.onerror = resolve;
+      // 某些浏览器不触发 onend：按字数估一个超时兜底
+      setTimeout(resolve, 2000 + piece.length * 400);
+      speechSynthesis.speak(u);
+    });
+  }
 }
 
 export function stopBrowserSpeech() {
+  speakToken++;
   try { speechSynthesis.cancel(); } catch {}
 }
 
@@ -241,8 +371,9 @@ const SUMMARY_SCHEMA = {
   required: ["score", "overall_zh", "strengths_zh", "improvements_zh", "key_phrases", "next_practice_zh"],
 };
 
-export async function summarizeSession({ missionTitle, accent, level, transcript, turns }) {
+export async function summarizeSession({ missionTitle, accent, level, transcript, turns, lang }) {
   const a = ACCENTS[accent] || ACCENTS.us;
+  const L = teacherLang(lang, accent);
   const lines = transcript.map((t) => `${t.role === "user" ? "学生" : "对方"}：${t.text}`).join("\n");
   const fb = turns
     .filter((t) => t.analysis && !t.analysis.no_speech)
@@ -251,10 +382,12 @@ export async function summarizeSession({ missionTitle, accent, level, transcript
         `${i + 1}. 学生说："${t.analysis.transcript || t.text}"；更地道：${t.analysis.better_expression}；表达：${t.analysis.expression_note_zh}；发音：${(t.analysis.pronunciation || []).map((p) => `${p.word}-${p.problem_zh}`).join("；") || "无"}；语调：${t.analysis.intonation_zh}；评分 ${t.analysis.rating}`
     )
     .join("\n");
-  return generateJSON(getSetting("teacherModel"), {
-    system: `你是一位英语口语老师，学生母语是中文，在练习${a.short}英语，水平${(LEVELS[level] || LEVELS.intermediate).label}。请根据整段角色扮演对话和每句点评，给出本次练习的总结。所有说明用简体中文；key_phrases 挑 3~6 个本场景最值得记住的${a.short}地道表达（优先选学生说错或没说好的地方），en 为英文，zh 为中文解释。strengths_zh / improvements_zh 各 2~4 条，具体、可执行。`,
+  const out = await generateJSON(getSetting("teacherModel"), {
+    system: `你是一位英语口语老师，学生母语是中文，在练习${a.short}英语，水平${(LEVELS[level] || LEVELS.intermediate).label}。请根据整段角色扮演对话和每句点评，给出本次练习的总结。key_phrases 挑 3~6 个本场景最值得记住的${a.short}地道表达（优先选学生说错或没说好的地方），en 为英文，zh 为解释。strengths_zh / improvements_zh 各 2~4 条，具体、可执行。
+语言要求：${L.instruction}（字段名带 _zh 只是历史命名，overall_zh、strengths_zh、improvements_zh、key_phrases[].zh、next_practice_zh 都按这个语言写。）`,
     parts: [{ text: `场景：${missionTitle}\n\n完整对话：\n${lines || "（空）"}\n\n每句点评：\n${fb || "（无）"}` }],
     schema: SUMMARY_SCHEMA,
     temperature: 0.4,
   });
+  return { ...out, _lang: L.key };
 }

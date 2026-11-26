@@ -9,12 +9,15 @@ export const DEFAULTS = {
   ttsModel: "gemini-3.8-flash-tts",
   characterVoice: "Puck",
   teacherVoice: "Kore",
-  teacherVoiceSource: "gemini", // gemini | browser
+  teacherVoiceSource: "browser", // browser（设备语音，快）| gemini（更自然，较慢）
+  teacherSpeed: "standard", // standard（flash）| fast（flash-lite，更快，发音判断可能略弱）
+  detailedTiming: false, // 卡片底部显示各阶段详细耗时
   teacherVoiceOn: true,
   accent: "us", // us | uk
   level: "intermediate", // beginner | intermediate | advanced
   mode: "immersive", // immersive | assisted
   stepMode: true, // 逐句模式：每句话后看完老师反馈再点“下一句”
+  teacherLanguage: "zh", // 老师点评语言：zh（中文）| en（English）
 };
 
 export const LIVE_VOICES = ["Puck", "Charon", "Kore", "Fenrir", "Aoede", "Leda", "Orus", "Zephyr"];
@@ -37,6 +40,22 @@ function read(key) {
     return DEFAULTS[key];
   }
 }
+
+// 一次性设置迁移（按版本号，只执行一次）
+const SETTINGS_VERSION = 2;
+(function migrate() {
+  try {
+    const v = Number(localStorage.getItem(PREFIX + "settingsVersion") || 0);
+    if (v >= SETTINGS_VERSION) return;
+    if (v < 2) {
+      // v2：老师语音默认改为设备语音（更快）。旧版本默认是 gemini，统一迁移一次
+      if (localStorage.getItem(PREFIX + "teacherVoiceSource") === JSON.stringify("gemini")) {
+        localStorage.setItem(PREFIX + "teacherVoiceSource", JSON.stringify("browser"));
+      }
+    }
+    localStorage.setItem(PREFIX + "settingsVersion", String(SETTINGS_VERSION));
+  } catch {}
+})();
 
 export function getSetting(key) {
   return read(key);
@@ -100,3 +119,52 @@ export const LEVELS = {
   intermediate: { label: "中级", en: "intermediate (B1-B2): speak at a natural but not rushed pace, everyday idioms are fine" },
   advanced: { label: "高级", en: "advanced (C1): speak at a fully natural native pace with idioms, phrasal verbs and slang where appropriate" },
 };
+
+// ---------------- 老师点评语言 ----------------
+const LABELS = {
+  zh: {
+    teacherSay: "老师说", better: "地道说法", expression: "表达", pron: "发音", intonation: "语调",
+    natural: "表达地道", improve: "可以更地道", noSpeech: "（这句没听清你的英语，跳过点评）", generating: "继续生成中…",
+    strengths: "👍 做得好", improvements: "🎯 要改进", phrases: "📌 本场景地道表达", timing: "点评用时",
+  },
+  en: {
+    teacherSay: "Teacher", better: "Better", expression: "Wording", pron: "Pronunciation", intonation: "Intonation",
+    natural: "Natural", improve: "Could be more natural", noSpeech: "(Couldn't hear your English clearly — skipped)", generating: "Writing…",
+    strengths: "👍 What went well", improvements: "🎯 To improve", phrases: "📌 Useful phrases", timing: "Feedback in",
+  },
+};
+
+export const TEACHER_LANGS = {
+  zh: { label: "中文" },
+  en: { label: "English" },
+};
+
+/**
+ * 老师点评语言的说明（老师提示词、单模型模式都复用）
+ * 返回 { key, label, promptName, instruction, speechLang, labels }
+ *  - promptName：写进提示词里的语言名
+ *  - instruction：一句完整的“请用某语言点评”的要求（英文，方便各种提示词直接拼接）
+ *  - speechLang：朗读点评用的 BCP-47 语言（zh-CN / en-US / en-GB）
+ */
+export function teacherLang(key, accentKey) {
+  const k = (key ?? read("teacherLanguage")) === "en" ? "en" : "zh";
+  const acc = ACCENTS[accentKey ?? read("accent")] || ACCENTS.us;
+  if (k === "en") {
+    return {
+      key: "en",
+      label: "English",
+      promptName: `simple, clear ${acc.en}`,
+      instruction: `Give all feedback, explanations and spoken comments in simple, clear ${acc.en} (short sentences, everyday B1-level words). Never use Chinese.`,
+      speechLang: acc.bcp47,
+      labels: LABELS.en,
+    };
+  }
+  return {
+    key: "zh",
+    label: "中文",
+    promptName: "简体中文",
+    instruction: "Give all feedback, explanations and spoken comments in Simplified Chinese (简体中文); quote English words or sentences only where needed.",
+    speechLang: "zh-CN",
+    labels: LABELS.zh,
+  };
+}

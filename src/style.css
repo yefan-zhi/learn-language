@@ -383,6 +383,7 @@ h1, h2, h3, h4 { letter-spacing: -0.01em; }
 .teacher-say { color: var(--color-text-sub); }
 .fb-muted { color: var(--color-text-sub); font-size: .88rem; }
 .fb-loading { color: var(--color-text-sub); font-size: .9rem; }
+.fb-timing { color: var(--color-text-sub); opacity: .65; font-size: .72rem; margin-top: 6px; text-align: right; font-variant-numeric: tabular-nums; }
 .dots::after { content: "⋯"; display: inline-block; animation: blink 1.2s infinite; }
 @keyframes blink { 50% { opacity: .2; } }
 .hold-banner {

@@ -52,6 +52,16 @@ class ViewMissions extends HTMLElement {
             </div>
             <small class="opt-desc">开启后，每说完一句先看完老师点评，再点“下一句”继续；对话中也可以随时切换。</small>
           </div>
+          <div class="opt">
+            <label>老师点评语言</label>
+            <div class="opt-switch">
+              <div class="segmented" id="tlang-seg">
+                <button data-val="zh" class="${getSetting("teacherLanguage") === "en" ? "" : "active"}">中文</button>
+                <button data-val="en" class="${getSetting("teacherLanguage") === "en" ? "active" : ""}">English</button>
+              </div>
+            </div>
+            <small class="opt-desc">选 English 时，老师用简单清楚的英文点评和朗读（按所选口音），课后总结也用英文。</small>
+          </div>
         </div>
 
         <p class="quota-line" id="quota-line" hidden></p>
@@ -64,6 +74,13 @@ class ViewMissions extends HTMLElement {
       this.querySelector("#mode-desc").textContent = MODES[getSetting("mode")]?.desc || "";
     };
     updateModeDesc();
+
+    this.querySelector("#tlang-seg").addEventListener("click", (e) => {
+      const b = e.target.closest("button");
+      if (!b) return;
+      this.querySelectorAll("#tlang-seg button").forEach((x) => x.classList.toggle("active", x === b));
+      setSetting("teacherLanguage", b.dataset.val);
+    });
 
     this.querySelector("#step-seg").addEventListener("click", (e) => {
       const b = e.target.closest("button");

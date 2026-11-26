@@ -4,19 +4,21 @@
 import "./audio-visualizer.js";
 import { LiveSession } from "../lib/gemini-live/geminilive.js";
 import { isModelGoneError, replaceModel } from "../lib/models.js";
-import { listModels } from "../lib/gemini-rest.js";
+import { listModels, fieldComplete } from "../lib/gemini-rest.js";
 import { AudioStreamer, AudioPlayer } from "../lib/gemini-live/mediaUtils.js";
-import { concatInt16, trimSilence, formatDuration } from "../lib/audio-utils.js";
-import { getSetting, setSetting, ACCENTS, LEVELS, authMode } from "../lib/settings.js";
+import { concatInt16, trimSilence, formatDuration, rms } from "../lib/audio-utils.js";
+import { getSetting, setSetting, ACCENTS, LEVELS, authMode, teacherLang } from "../lib/settings.js";
 import { startRelaySession, reportUsage } from "../lib/relay.js";
-import { analyzeTurn, teacherTTS, nativeTTS, wordTTS, speakBrowser, stopBrowserSpeech, unlockBrowserSpeech } from "../lib/teacher.js";
+import { analyzeTurnStream, teacherTTS, nativeTTS, wordTTS, speakBrowser, stopBrowserSpeech, unlockBrowserSpeech } from "../lib/teacher.js";
 import { escapeHtml, feedbackHtml } from "../lib/dom.js";
 import { acquireMic, reacquireMic, watchAudioLifecycle } from "../lib/mic-permission.js";
 
 const SESSION_LIMIT_SEC = 15 * 60; // Live API 纯音频会话上限约 15 分钟
 const RING_SAMPLES = 16000 * 3;
 const TEACHER_WAIT_MS = 12000;
-const ANALYSIS_DELAY_MS = 800;
+// 本地 VAD：说话至少 0.3 秒后，静音 0.7 秒就认为这句说完，提前开始老师分析
+const VAD_MIN_VOICE = 16000 * 0.3;
+const VAD_END_SILENCE = 16000 * 0.7;
 
 function buildSystemInstruction(cfg) {
   const m = cfg.mission;
@@ -73,6 +75,7 @@ class ViewChat extends HTMLElement {
       accent: cfg.accent,
       level: cfg.level,
       mode: cfg.mode,
+      teacherLang: teacherLang(undefined, cfg.accent).key,
       transcript: [],
       turns: [],
       summary: null,
@@ -167,7 +170,9 @@ class ViewChat extends HTMLElement {
   stepReady() {
     const t = this.stepTurn;
     if (this.liveDown && !t) return true;
-    return !t || t.status === "done" || t.status === "error";
+    if (!t) return true;
+    // 点评完成，且老师语音已经准备好/播完/跳过（语音还在合成时也算“没准备好”，可以点“跳过等待”）
+    return (t.status === "done" || t.status === "error") && t.voice !== "waiting";
   }
 
   updateStepUI() {
@@ -373,6 +378,8 @@ class ViewChat extends HTMLElement {
     this.liveDown = false;
     this.reconnecting = false;
     this.goAwayPending = false;
+    this.resetVad();
+    this.earlyJob = null;
 
     try {
       // iOS：必须在用户手势里尽早创建/解锁音频
@@ -628,6 +635,7 @@ Continue seamlessly from exactly this point. Do NOT greet again, do NOT restart 
     if (!this.modelSpeaking && this.userChunks && this.userChunks.length && this.pendingUserText.trim()) {
       this.finalizeUserTurn();
     }
+    this.cancelEarly("session-end");
     this.closeModelEntry();
     this.state = "ended";
     if (this.live) this.live.close();
@@ -647,7 +655,10 @@ Continue seamlessly from exactly this point. Do NOT greet again, do NOT restart 
     if (this.stepPaused || this.liveDown || this.reconnecting) return; // 逐句模式暂停中：不上传、不录音
     if (this.micHeld) return; // 老师说话时不上传、不录音
     if (this.clipPlaying) return; // 正在回放录音/示范发音：不上传，避免把回放当成用户说话
-    if (!this.modelSpeaking && !(this.player && this.player.streaming)) this.userChunks.push(pcm);
+    if (!this.modelSpeaking && !(this.player && this.player.streaming)) {
+      this.userChunks.push(pcm);
+      this.vadStep(pcm);
+    }
     this.live.sendAudio(pcm);
   }
 
@@ -662,8 +673,11 @@ Continue seamlessly from exactly this point. Do NOT greet again, do NOT restart 
   onInputText(t) {
     // 刚结束的一句话的迟到转写
     const lt = this.lastFinalizedTurn;
-    if (this.modelSpeaking && lt && !lt.analysisStarted && Date.now() - lt.finalizedAt < 2000) {
+    if (this.modelSpeaking && lt && Date.now() - lt.finalizedAt < 3000) {
+      // 分析用的是录音，这里只更新卡片上的文字，不重新分析
       lt.text = joinText(lt.text, t);
+      const entry = this.session.transcript.find((e) => e.turnId === lt.id);
+      if (entry) entry.text = lt.text;
       this.renderTurn(lt);
       return;
     }
@@ -703,9 +717,16 @@ Continue seamlessly from exactly this point. Do NOT greet again, do NOT restart 
     this.removeLiveUser();
     const pcm = concatInt16(chunks);
     const trimmed = trimSilence(pcm, 16000);
-    if (!text && !trimmed) return null;
-    if (!text && !this.lastCharacterText) return null; // 开场前的环境声
-    if (!text && trimmed && trimmed.length < 16000 * 0.6) return null; // 很短又没有转写，多半是噪音
+    const early = this.takeEarlyJob();
+    const silenceMs = this.vadSilenceMs();
+    this.resetVad();
+    const drop = () => {
+      if (early) early.controller.abort();
+      return null;
+    };
+    if (!text && !trimmed) return drop();
+    if (!text && !this.lastCharacterText) return drop(); // 开场前的环境声
+    if (!text && trimmed && trimmed.length < 16000 * 0.6) return drop(); // 很短又没有转写，多半是噪音
     const turn = {
       id: `t_${Date.now()}_${this.session.turns.length}`,
       text,
@@ -721,9 +742,17 @@ Continue seamlessly from exactly this point. Do NOT greet again, do NOT restart 
     this.session.turns.push(turn);
     this.session.transcript.push({ role: "user", text, turnId: turn.id });
     this.lastFinalizedTurn = turn;
-    this.renderTurn(turn);
     if (turn.voice === "waiting") this.teacherQueue.push(turn);
-    setTimeout(() => this.runAnalysis(turn), ANALYSIS_DELAY_MS);
+    // 本地 VAD 已经提前开始分析（且之后没再说话）：直接沿用；否则现在立刻开始
+    const job =
+      early ||
+      this.startAnalysisJob({
+        pcm: turn.pcm,
+        asrText: text,
+        prevCharacterText: this.lastCharacterText,
+        spokeEnd: Date.now() - silenceMs,
+      });
+    this.adoptJob(turn, job);
     return turn;
   }
 
@@ -734,60 +763,257 @@ Continue seamlessly from exactly this point. Do NOT greet again, do NOT restart 
     card?.scrollIntoView({ behavior: "smooth", block: "nearest" });
   }
 
-  async runAnalysis(turn) {
-    turn.analysisStarted = true;
-    turn.status = "analyzing";
-    const entry = this.session.transcript.find((e) => e.turnId === turn.id);
-    if (entry) entry.text = turn.text;
-    this.renderTurn(turn);
+  // ---------------- 本地 VAD（提前开始分析） ----------------
+  resetVad() {
+    this.vad = { ref: null, voiced: 0, silence: 0, streak: 0, noise: 0.004 };
+  }
+
+  vadSilenceMs() {
+    return this.vad ? Math.round((this.vad.silence / 16000) * 1000) : 0;
+  }
+
+  vadStep(pcm) {
+    const v = this.vad;
+    if (!v) return;
+    // 录音缓冲被重置（新的一句/暂停后）：重新开始判断
+    if (v.ref !== this.userChunks) {
+      if (this.earlyJob) this.cancelEarly("buffer-reset");
+      this.resetVad();
+      this.vad.ref = this.userChunks;
+      return this.vadStep(pcm);
+    }
+    const e = rms(pcm);
+    const thr = Math.max(0.012, v.noise * 3);
+    if (e > thr) {
+      v.voiced += pcm.length;
+      v.silence = 0;
+      v.streak++;
+      if (this.earlyJob) {
+        this.earlyJob.dirty = true;
+        // 又连续说了 ~170ms 以上：之前的“说完”判断不成立，取消提前分析
+        if (v.streak >= 2) this.cancelEarly("resumed");
+      }
+    } else {
+      v.streak = 0;
+      v.noise = v.noise * 0.95 + e * 0.05;
+      if (v.voiced >= VAD_MIN_VOICE) v.silence += pcm.length;
+      if (!this.earlyJob && v.voiced >= VAD_MIN_VOICE && v.silence >= VAD_END_SILENCE && !v.triedAt) {
+        this.startEarly();
+      }
+    }
+  }
+
+  startEarly() {
+    const chunks = this.userChunks;
+    const pcm = trimSilence(concatInt16(chunks), 16000);
+    this.vad.triedAt = chunks.length;
+    if (!pcm || pcm.length < 16000 * 0.4) return; // 太短，等模型判定
+    const job = this.startAnalysisJob({
+      pcm,
+      asrText: this.pendingUserText.trim(),
+      prevCharacterText: this.lastCharacterText,
+      spokeEnd: Date.now() - this.vadSilenceMs(),
+    });
+    job.early = true;
+    this.earlyJob = job;
+    console.log("[老师] 本地检测到一句话结束，提前开始分析");
+  }
+
+  cancelEarly(reason) {
+    const job = this.earlyJob;
+    if (!job) return;
+    this.earlyJob = null;
+    job.controller.abort();
+    if (this.vad) {
+      this.vad.triedAt = 0;
+      this.vad.silence = 0;
+    }
+    console.log(`[老师] 取消提前分析（${reason}）`);
+  }
+
+  /** 句子定稿时取走提前开始的分析；如果之后又说过话就作废 */
+  takeEarlyJob() {
+    const job = this.earlyJob;
+    this.earlyJob = null;
+    if (!job) return null;
+    if (job.dirty || job.error) {
+      job.controller.abort();
+      return null;
+    }
+    return job;
+  }
+
+  /** 开始一次（流式）老师分析；结果先存在 job 上，句子定稿后再挂到 turn 上 */
+  startAnalysisJob({ pcm, asrText, prevCharacterText, spokeEnd }) {
     const cfg = this._cfg;
-    try {
-      const a = await analyzeTurn({
-        pcm: turn.pcm,
-        asrText: turn.text,
-        prevCharacterText: turn.prevCharacterText,
+    const job = {
+      controller: new AbortController(),
+      t: { spokeEnd, analysisStart: Date.now() },
+      partial: null,
+      raw: "",
+      done: false,
+      result: null,
+      error: null,
+      turn: null,
+      dirty: false,
+      lang: teacherLang(undefined, cfg.accent).key,
+    };
+    analyzeTurnStream(
+      {
+        pcm,
+        asrText,
+        prevCharacterText,
         missionTitle: cfg.mission.title_en + (cfg.topic ? ` (topic: ${cfg.topic})` : ""),
         missionDesc: cfg.mission.desc_zh,
         role: cfg.mission.role_en,
         accent: cfg.accent,
         level: cfg.level,
+        lang: job.lang,
+      },
+      {
+        signal: job.controller.signal,
+        onFirstToken: () => {
+          if (!job.t.firstToken) job.t.firstToken = Date.now();
+        },
+        onPartial: (p, raw) => {
+          job.partial = p;
+          job.raw = raw;
+          if (job.turn) this.onJobProgress(job);
+        },
+      }
+    )
+      .then((a) => {
+        job.result = a;
+        job.done = true;
+        job.t.cardDone = Date.now();
+        if (job.turn) this.onJobDone(job);
+      })
+      .catch((e) => {
+        if (e?.name === "AbortError" || job.controller.signal.aborted) return;
+        job.error = e;
+        job.done = true;
+        if (job.turn) this.onJobDone(job);
       });
+    return job;
+  }
+
+  adoptJob(turn, job) {
+    job.turn = turn;
+    turn.job = job;
+    turn.t = job.t;
+    turn.analysisStarted = true;
+    turn.status = "analyzing";
+    this.renderTurn(turn);
+    if (job.partial) this.onJobProgress(job);
+    if (job.done) this.onJobDone(job);
+  }
+
+  /** 流式片段到达：更新卡片；老师要说的话一完整就开始准备语音 */
+  onJobProgress(job) {
+    const turn = job.turn;
+    if (!turn || turn.status === "done" || turn.status === "error") return;
+    const p = job.partial || {};
+    turn.partial = p;
+    if (p.no_speech === true && turn.voice === "waiting") turn.voice = "skipped";
+    if (!turn.spokenText && p.spoken_feedback_zh && fieldComplete(job.raw, "spoken_feedback_zh") && p.no_speech !== true) {
+      turn.spokenText = p.spoken_feedback_zh;
+      this.prepareTeacherVoice(turn);
+    }
+    this.scheduleRender(turn);
+  }
+
+  onJobDone(job) {
+    const turn = job.turn;
+    if (!turn) return;
+    const entry = this.session.transcript.find((e) => e.turnId === turn.id);
+    if (job.error) {
+      console.error("点评失败", job.error);
+      turn.status = "error";
+      turn.error = job.error.message || String(job.error);
+      if (turn.voice !== "played") turn.voice = "skipped";
+    } else {
+      const a = job.result || {};
       turn.analysis = a;
+      turn.partial = null;
       if (!turn.text && a.transcript) {
         turn.text = a.transcript;
         if (entry) entry.text = a.transcript;
       }
       turn.status = "done";
-      if (a.no_speech) turn.voice = "skipped";
-      this.renderTurn(turn);
-      this.emit();
-      this.updateStepUI();
-      this.revealStepCard(turn);
-
-      if (turn.voice === "waiting" && this.state === "active") {
-        if (getSetting("teacherVoiceSource") === "browser") {
-          turn.voice = "ready";
-        } else {
-          try {
-            turn.teacherPcm = await teacherTTS(a.spoken_feedback_zh);
-            if (turn.voice === "waiting") turn.voice = "ready";
-          } catch (e) {
-            console.warn("TTS 失败，改用设备语音", e);
-            if (turn.voice === "waiting") turn.voice = "ready-browser";
-          }
-        }
+      if (a.no_speech && turn.voice !== "played") turn.voice = "skipped";
+      if (!turn.spokenText && a.spoken_feedback_zh && !a.no_speech) {
+        turn.spokenText = a.spoken_feedback_zh;
+        this.prepareTeacherVoice(turn);
       }
-    } catch (e) {
-      console.error("点评失败", e);
-      turn.status = "error";
-      turn.error = e.message;
-      turn.voice = "skipped";
-      this.renderTurn(turn);
-      this.emit();
-      this.updateStepUI();
-      this.revealStepCard(turn);
     }
+    this.logTiming(turn);
+    this.renderTurn(turn);
+    this.emit();
+    this.updateStepUI();
+    this.revealStepCard(turn);
     this.pumpTeacher();
+  }
+
+  /** 准备老师语音：设备语音直接就绪；Gemini 语音在后台合成（和剩余的流式生成并行） */
+  prepareTeacherVoice(turn) {
+    if (turn.voice !== "waiting" || this.state !== "active") return;
+    if (getSetting("teacherVoiceSource") !== "gemini") {
+      turn.voice = "ready-browser";
+      this.pumpTeacher();
+      return;
+    }
+    const text = turn.spokenText;
+    teacherTTS(text, turn.job?.lang)
+      .then((pcm) => {
+        turn.teacherPcm = pcm;
+        if (turn.voice === "waiting") turn.voice = "ready";
+      })
+      .catch((e) => {
+        console.warn("TTS 失败，改用设备语音", e);
+        if (turn.voice === "waiting") turn.voice = "ready-browser";
+      })
+      .finally(() => {
+        this.updateStepUI();
+        this.pumpTeacher();
+      });
+  }
+
+  scheduleRender(turn) {
+    if (turn._raf) return;
+    turn._raf = requestAnimationFrame(() => {
+      turn._raf = 0;
+      this.renderTurn(turn);
+    });
+  }
+
+  /** 朗读老师点评用的语言（按这句点评生成时的语言） */
+  speechLangOf(turn) {
+    return teacherLang(turn.analysis?._lang || turn.partial?._lang || turn.job?.lang, this._cfg.accent).speechLang;
+  }
+
+  timingText(turn) {
+    const t = turn.t;
+    if (!t || !t.spokeEnd || !t.cardDone) return "";
+    const s = (ms) => `${(Math.max(0, ms) / 1000).toFixed(1)}s`;
+    const T = teacherLang(turn.job?.lang || turn.analysis?._lang, this._cfg.accent).labels;
+    let out = `${T.timing} ${s(t.cardDone - t.spokeEnd)}`;
+    if (getSetting("detailedTiming")) {
+      const parts = [`开始分析 +${s(t.analysisStart - t.spokeEnd)}`];
+      if (t.firstToken) parts.push(`首字 +${s(t.firstToken - t.spokeEnd)}`);
+      parts.push(`完成 +${s(t.cardDone - t.spokeEnd)}`);
+      if (t.voiceStart) parts.push(`语音 +${s(t.voiceStart - t.spokeEnd)}`);
+      out = `${parts.join(" · ")}${turn.job?.early ? "（提前触发）" : ""}`;
+    }
+    return out;
+  }
+
+  logTiming(turn) {
+    const t = turn.t;
+    if (!t || !t.spokeEnd) return;
+    const r = (x) => (x ? `${x - t.spokeEnd}ms` : "-");
+    console.log(
+      `[老师计时] 说完→开始分析 ${r(t.analysisStart)} · 首字 ${r(t.firstToken)} · 卡片完成 ${r(t.cardDone)} · 语音开始 ${r(t.voiceStart)}${turn.job?.early ? "（本地VAD提前）" : ""}`
+    );
   }
 
   emit() {
@@ -836,11 +1062,20 @@ Continue seamlessly from exactly this point. Do NOT greet again, do NOT restart 
     const card = this.querySelector(`[data-turn="${turn.id}"]`);
     card?.classList.add("speaking");
     card?.scrollIntoView({ behavior: "smooth", block: "nearest" });
+    const markStart = () => {
+      if (turn.t && !turn.t.voiceStart) {
+        turn.t.voiceStart = Date.now();
+        this.logTiming(turn);
+        if (getSetting("detailedTiming")) this.renderTurn(turn);
+      }
+    };
     try {
+      const text = turn.spokenText || turn.analysis?.spoken_feedback_zh;
       if (turn.voice === "ready" && turn.teacherPcm && this.player) {
+        markStart();
         await this.player.playClip(turn.teacherPcm, 24000);
-      } else if (turn.analysis) {
-        await speakBrowser(turn.analysis.spoken_feedback_zh, "zh-CN");
+      } else if (text) {
+        await speakBrowser(text, this.speechLangOf(turn), 1.0, markStart);
       }
     } catch (e) {
       console.warn(e);
@@ -959,7 +1194,9 @@ Continue seamlessly from exactly this point. Do NOT greet again, do NOT restart 
       turn.status === "error"
         ? `<div class="fb-muted">点评失败：${escapeHtml(turn.error)}</div>`
         : turn.analysis
-        ? feedbackHtml(turn.analysis, { compact: false })
+        ? feedbackHtml(turn.analysis, { compact: false, timing: this.timingText(turn) })
+        : turn.partial && Object.keys(turn.partial).length
+        ? feedbackHtml(turn.partial, { partial: true })
         : `<div class="fb-loading"><span class="dots"></span> 老师正在听…</div>`;
     const canTeacher = turn.analysis && !turn.analysis.no_speech && turn.status !== "error";
     wrap.innerHTML = `
@@ -1079,10 +1316,10 @@ Continue seamlessly from exactly this point. Do NOT greet again, do NOT restart 
         async () => {
           if (turn.teacherPcm) return { pcm: turn.teacherPcm, rate: 24000 };
           if (browser) return null;
-          turn.teacherPcm = await teacherTTS(a.spoken_feedback_zh);
+          turn.teacherPcm = await teacherTTS(turn.spokenText || a.spoken_feedback_zh, a._lang);
           return { pcm: turn.teacherPcm, rate: 24000 };
         },
-        () => speakBrowser(a.spoken_feedback_zh, "zh-CN")
+        () => speakBrowser(turn.spokenText || a.spoken_feedback_zh, this.speechLangOf(turn))
       );
     }
   }

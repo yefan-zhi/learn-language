@@ -69,6 +69,19 @@ export async function relayGenerate(model, body) {
   return post("/api/generate", { model, body });
 }
 
+/** 流式代理：返回原始 Response（SSE），出错时抛出带 status 的 Error */
+export async function relayStream(model, body, signal) {
+  if (!relayConfigured()) throw new Error("中转服务还没有部署（站长需要先配置 RELAY_URL）");
+  const res = await fetch(`${RELAY_URL}/api/generate`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ ...creds(), model, body, stream: true }),
+    signal,
+  });
+  if (!res.ok) await parse(res);
+  return res;
+}
+
 export async function relayModels() {
   if (!relayConfigured()) throw new Error("中转服务还没有部署");
   const c = creds();

@@ -115,7 +115,28 @@ export function pickModels(models) {
     (n) => (/extended|thinking/.test(n) ? 2 : 0) + (/lite/.test(n) ? 1 : 0)
   );
 
-  return { live, text, tts };
+  // 极速老师模型：gemini-X-flash-lite（不含 tts/audio/live 等）
+  const BAD_LITE = /tts|audio|live|image|embedding|transcribe|translate|veo|imagen/;
+  const liteAll = gen.filter((n) => /^gemini-\d+(\.\d+)?-flash-lite/.test(n) && !BAD_LITE.test(n));
+  const litePure = liteAll.filter((n) => /^gemini-\d+(\.\d+)?-flash-lite$/.test(n));
+  const lite = [...rank(litePure), ...rank(liteAll.filter((n) => !litePure.includes(n)))];
+
+  return { live, text, tts, lite };
+}
+
+/** 当前可用的极速（lite）老师模型；没有检测到时返回 null */
+export function liteModel() {
+  const c = cachedPicks();
+  return bestOf("lite", c && c.picks) || null;
+}
+
+/** 老师点评实际使用的模型：极速模式且有 lite 模型时用 lite */
+export function teacherModelFor(getSettingFn) {
+  if (getSettingFn("teacherSpeed") === "fast") {
+    const l = liteModel();
+    if (l) return l;
+  }
+  return getSettingFn("teacherModel");
 }
 
 // ---------------- 模型列表缓存 ----------------
@@ -134,7 +155,8 @@ export function cachedPicks() {
 let inflight = null;
 export async function refreshPicks(listModelsFn, { force = false } = {}) {
   const c = cachedPicks();
-  if (!force && c && c.day === today()) return c.picks;
+  // 旧缓存里没有 lite 分类时也重新检测一次
+  if (!force && c && c.day === today() && Array.isArray(c.picks.lite)) return c.picks;
   if (inflight) return inflight;
   inflight = (async () => {
     try {

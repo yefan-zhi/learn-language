@@ -5,7 +5,7 @@ import { summarizeSession, teacherTTS, nativeTTS, wordTTS, speakBrowser, stopBro
 import { saveSession, deleteSession } from "../lib/history.js";
 import { int16ToWavBlob, formatDuration } from "../lib/audio-utils.js";
 import { escapeHtml, feedbackHtml } from "../lib/dom.js";
-import { getSetting, ACCENTS, LEVELS } from "../lib/settings.js";
+import { getSetting, ACCENTS, LEVELS, teacherLang } from "../lib/settings.js";
 
 class ViewSummary extends HTMLElement {
   set session(v) {
@@ -121,6 +121,7 @@ class ViewSummary extends HTMLElement {
         level: s.level,
         transcript: s.transcript.filter((t) => t.text),
         turns: s.turns,
+        lang: s.teacherLang,
       });
       this.summaryError = null;
     } catch (e) {
@@ -141,15 +142,16 @@ class ViewSummary extends HTMLElement {
     }
     if (s.summary) {
       const m = s.summary;
+      const T = teacherLang(m._lang || "zh", s.accent).labels;
       el.innerHTML = `
         <div class="score-row"><div class="score">${m.score ?? "-"}</div><div class="overall-text">${escapeHtml(m.overall_zh)}</div></div>
         <div class="two-col">
-          <div><h4>👍 做得好</h4><ul>${(m.strengths_zh || []).map((x) => `<li>${escapeHtml(x)}</li>`).join("")}</ul></div>
-          <div><h4>🎯 要改进</h4><ul>${(m.improvements_zh || []).map((x) => `<li>${escapeHtml(x)}</li>`).join("")}</ul></div>
+          <div><h4>${T.strengths}</h4><ul>${(m.strengths_zh || []).map((x) => `<li>${escapeHtml(x)}</li>`).join("")}</ul></div>
+          <div><h4>${T.improvements}</h4><ul>${(m.improvements_zh || []).map((x) => `<li>${escapeHtml(x)}</li>`).join("")}</ul></div>
         </div>
         ${
           (m.key_phrases || []).length
-            ? `<h4>📌 本场景地道表达</h4><ul class="phrases">${m.key_phrases
+            ? `<h4>${T.phrases}</h4><ul class="phrases">${m.key_phrases
                 .map((p, i) => `<li><button class="play-mini" data-phrase="${i}" title="朗读">🔊</button><span class="en">${escapeHtml(p.en)}</span><span class="zh">${escapeHtml(p.zh)}</span></li>`)
                 .join("")}</ul>`
             : ""
@@ -302,7 +304,7 @@ class ViewSummary extends HTMLElement {
       if (t.teacherPcm) return this.playPcm(btn, t.teacherPcm, 24000);
       if (getSetting("teacherVoiceSource") === "browser") {
         this.setPlaying(btn);
-        await speakBrowser(t.analysis.spoken_feedback_zh, "zh-CN");
+        await speakBrowser(t.analysis.spoken_feedback_zh, teacherLang(t.analysis._lang || "zh", this._s.accent).speechLang);
         this.resetPlaying();
         return;
       }
@@ -310,7 +312,7 @@ class ViewSummary extends HTMLElement {
       btn.textContent = "⏳ 生成中";
       btn.disabled = true;
       try {
-        t.teacherPcm = await teacherTTS(t.analysis.spoken_feedback_zh);
+        t.teacherPcm = await teacherTTS(t.analysis.spoken_feedback_zh, t.analysis._lang || "zh");
         btn.textContent = label;
         btn.disabled = false;
         this.playPcm(btn, t.teacherPcm, 24000);
@@ -319,7 +321,7 @@ class ViewSummary extends HTMLElement {
         btn.textContent = label;
         btn.disabled = false;
         this.setPlaying(btn);
-        await speakBrowser(t.analysis.spoken_feedback_zh, "zh-CN");
+        await speakBrowser(t.analysis.spoken_feedback_zh, teacherLang(t.analysis._lang || "zh", this._s.accent).speechLang);
         this.resetPlaying();
       }
     }

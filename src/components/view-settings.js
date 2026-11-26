@@ -3,7 +3,7 @@ import { getSettings, setSetting, LIVE_VOICES, TTS_VOICES, DEFAULTS, authMode } 
 import { getQuota, isUnlimited } from "../lib/relay.js";
 import { relayConfigured } from "../lib/config.js";
 import { listModels, pickModels } from "../lib/gemini-rest.js";
-import { setManual } from "../lib/models.js";
+import { setManual, liteModel } from "../lib/models.js";
 import { escapeHtml, lockScroll, unlockScroll } from "../lib/dom.js";
 
 export function openSettings(opts = {}) {
@@ -76,14 +76,30 @@ class ViewSettings extends HTMLElement {
 
             <details class="advanced">
               <summary>高级设置（语音、音色、模型）</summary>
-              <label class="check"><input type="checkbox" id="teacherVoiceOn" ${s.teacherVoiceOn ? "checked" : ""}> 老师每句话后用中文语音点评</label>
+              <label class="check"><input type="checkbox" id="teacherVoiceOn" ${s.teacherVoiceOn ? "checked" : ""}> 老师每句话后用语音点评</label>
+              <label class="field">
+                <span>老师点评语言</span>
+                <select id="teacherLanguage">
+                  <option value="zh" ${s.teacherLanguage !== "en" ? "selected" : ""}>中文</option>
+                  <option value="en" ${s.teacherLanguage === "en" ? "selected" : ""}>English（简单英文点评）</option>
+                </select>
+              </label>
               <label class="field">
                 <span>老师声音来源</span>
                 <select id="teacherVoiceSource">
-                  <option value="gemini" ${s.teacherVoiceSource === "gemini" ? "selected" : ""}>Gemini 语音（更自然，稍慢）</option>
-                  <option value="browser" ${s.teacherVoiceSource === "browser" ? "selected" : ""}>设备自带语音（更快）</option>
+                  <option value="browser" ${s.teacherVoiceSource !== "gemini" ? "selected" : ""}>设备自带语音（快，默认）</option>
+                  <option value="gemini" ${s.teacherVoiceSource === "gemini" ? "selected" : ""}>Gemini 语音（更自然，较慢）</option>
                 </select>
               </label>
+              <label class="field ${liteModel() ? "" : "hidden"}" id="speed-field">
+                <span>老师模型速度</span>
+                <select id="teacherSpeed">
+                  <option value="standard" ${s.teacherSpeed !== "fast" ? "selected" : ""}>标准（Flash）</option>
+                  <option value="fast" ${s.teacherSpeed === "fast" ? "selected" : ""}>极速（Flash-Lite，发音判断可能略弱）</option>
+                </select>
+                <small id="lite-name">${liteModel() ? `极速模式使用 ${escapeHtml(liteModel())}` : ""}</small>
+              </label>
+              <label class="check"><input type="checkbox" id="detailedTiming" ${s.detailedTiming ? "checked" : ""}> 点评卡片显示详细计时（说完→分析→首字→完成→语音）</label>
               <label class="field">
                 <span>老师音色（Gemini）</span>
                 <select id="teacherVoice">${opt(TTS_VOICES, s.teacherVoice)}</select>
@@ -206,6 +222,10 @@ class ViewSettings extends HTMLElement {
           $("teacherModel").value = picked.text.find((m) => /flash/.test(m) && !/lite/.test(m)) || picked.text[0];
           notes.push(`老师模型已切换为 ${$("teacherModel").value}`);
         }
+        if (picked.lite && picked.lite.length) {
+          $("speed-field").classList.remove("hidden");
+          $("lite-name").textContent = `极速模式使用 ${picked.lite[0]}`;
+        }
         if (!picked.live.length) notes.push("⚠️ 没有可用的 Live API 模型");
         st.innerHTML = `✅ 可用。找到 ${picked.live.length} 个实时对话模型。${notes.length ? "<br>" + notes.map(escapeHtml).join("<br>") : ""}<br>别忘了点“保存”。`;
       } catch (e) {
@@ -241,6 +261,9 @@ class ViewSettings extends HTMLElement {
       setSetting("inviteCode", $("inviteCode").value.trim());
       setSetting("teacherVoiceOn", $("teacherVoiceOn").checked);
       setSetting("teacherVoiceSource", $("teacherVoiceSource").value);
+      setSetting("teacherSpeed", $("teacherSpeed").value);
+      setSetting("teacherLanguage", $("teacherLanguage").value);
+      setSetting("detailedTiming", $("detailedTiming").checked);
       setSetting("teacherVoice", $("teacherVoice").value);
       setSetting("characterVoice", $("characterVoice").value);
       // 用户改动过的模型记为“手动指定”（自动选择不再覆盖，除非它确定不可用）

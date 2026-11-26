@@ -179,15 +179,17 @@ async function handleGenerate(request, env) {
     if (Math.random() < 0.1) await putInt(env, rKey, count + 10);
   }
 
-  const up = await fetch(`${base(env)}/v1beta/models/${model}:generateContent`, {
+  // stream=true：转发 streamGenerateContent 的 SSE（老师点评边生成边显示）
+  const stream = body.stream === true;
+  const method = stream ? "streamGenerateContent?alt=sse" : "generateContent";
+  const up = await fetch(`${base(env)}/v1beta/models/${model}:${method}`, {
     method: "POST",
     headers: { "Content-Type": "application/json", "x-goog-api-key": env.GEMINI_API_KEY },
     body: JSON.stringify(body.body),
   });
-  return new Response(up.body, {
-    status: up.status,
-    headers: { "Content-Type": up.headers.get("Content-Type") || "application/json" },
-  });
+  const headers = { "Content-Type": up.headers.get("Content-Type") || (stream ? "text/event-stream" : "application/json") };
+  if (stream && up.ok) headers["Cache-Control"] = "no-cache";
+  return new Response(up.body, { status: up.status, headers });
 }
 
 async function handleModels(request, env, url) {
