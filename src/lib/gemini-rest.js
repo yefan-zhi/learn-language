@@ -1,5 +1,6 @@
 // Gemini REST API（浏览器直连）
-import { getSetting } from "./settings.js";
+import { getSetting, authMode } from "./settings.js";
+import { relayGenerate, relayModels } from "./relay.js";
 
 const BASE = "https://generativelanguage.googleapis.com/v1beta";
 
@@ -7,9 +8,36 @@ function key() {
   return (getSetting("apiKey") || "").trim();
 }
 
+/**
+ * 统一请求入口：有自己的 Key 时直连 Google；否则在邀请码模式下转发给中转服务
+ */
 async function request(path, { method = "GET", body, apiKey } = {}) {
   const k = apiKey ?? key();
-  if (!k) throw new Error("还没有设置 API Key");
+  if (!k) {
+    if (authMode() === "invite") return relayRequest(path, body);
+    throw new Error("还没有设置 API Key 或邀请码");
+  }
+  return directRequest(path, { method, body, k });
+}
+
+async function relayRequest(path, body) {
+  const gen = path.match(/^models\/([^:]+):generateContent$/);
+  for (let attempt = 0; ; attempt++) {
+    try {
+      if (gen) return await relayGenerate(gen[1], body);
+      if (path.startsWith("models?")) return await relayModels();
+      throw new Error(`邀请码模式不支持这个请求：${path}`);
+    } catch (e) {
+      if (attempt === 0 && (e.status === 503 || e.status === 500 || (e.status === 429 && e.code !== "quota"))) {
+        await new Promise((r) => setTimeout(r, 1200));
+        continue;
+      }
+      throw e;
+    }
+  }
+}
+
+async function directRequest(path, { method, body, k }) {
   let lastErr;
   for (let attempt = 0; attempt < 2; attempt++) {
     const res = await fetch(`${BASE}/${path}`, {

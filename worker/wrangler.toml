@@ -1,0 +1,31 @@
+name = "learn-language-relay"
+main = "src/index.js"
+compatibility_date = "2026-11-01"
+workers_dev = true
+
+# 不要把 GEMINI_API_KEY / INVITE_CODE 写在这里！用 `npx wrangler secret put` 设置。
+
+[vars]
+DEVICE_DAILY_MINUTES = "30"
+TOTAL_DAILY_MINUTES = "120"
+SESSION_MAX_MINUTES = "15"
+DEVICE_DAILY_REQUESTS = "400"
+LIVE_API_VERSION = "v1beta"
+ALLOWED_ORIGINS = "https://yefan-zhi.github.io,http://localhost:5173,http://localhost:4173"
+
+# 部署前：npx wrangler kv namespace create USAGE，然后把输出的 id 填到下面
+[[kv_namespaces]]
+binding = "USAGE"
+id = "REPLACE_WITH_KV_NAMESPACE_ID"
+
+# 每设备每分钟最多 40 次点评请求（不占 KV 写入额度）
+[[ratelimits]]
+name = "GEN_LIMITER"
+namespace_id = "1001"
+simple = { limit = 40, period = 60 }
+
+# 邀请码输错的 IP 每分钟最多 10 次
+[[ratelimits]]
+name = "AUTH_LIMITER"
+namespace_id = "1002"
+simple = { limit = 10, period = 60 }

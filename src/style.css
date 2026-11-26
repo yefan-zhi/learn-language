@@ -458,3 +458,13 @@ h1, h2, h3, h4 { letter-spacing: -0.01em; }
 @media (min-width: 720px) {
   .options { grid-template-columns: 1fr 1fr 1fr; }
 }
+
+/* 邀请码 */
+.quota-line { text-align: center; font-size: .9rem; font-weight: 700; color: var(--color-accent-primary); background: var(--color-accent-glow); border-radius: 999px; padding: 6px 14px; margin: 0 auto 12px; width: fit-content; max-width: 100%; }
+.quota-line.empty { color: var(--color-danger); background: rgba(229,115,115,.12); }
+.invite-modal .invite-alt { text-align: center; color: var(--color-text-sub); }
+#auth-tabs { margin-top: 6px; }
+#auth-tabs button { flex: 1; font-size: .85rem; }
+.opt-desc { display: block; margin-top: 6px; color: var(--color-text-sub); font-size: .8rem; }
+[hidden] { display: none !important; }
+#auth-tabs button { white-space: normal; line-height: 1.2; }

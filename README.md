@@ -12,14 +12,19 @@
 
 ## 使用方法
 
-1. 到 [Google AI Studio](https://aistudio.google.com/apikey) 申请一个 Gemini API Key（有免费额度）。
-2. 打开网页 → 右上角 ⚙️ 设置 → 填入 Key → 点“测试 Key 并检测可用模型” → 保存。
-3. 选择口音（美式/英式）、难度、模式（沉浸 / 辅助），挑一个场景开始对话。对方会先开口。
-4. 点“结束并查看总结”查看逐句回放和整体点评。
+有两种接入方式：
+
+- **邀请码（朋友）**：打开网页会弹出“输入邀请码”，填入站长给你的邀请码就能用站长的额度（每台设备每天有分钟数上限）。
+- **自己的 API Key**：到 [Google AI Studio](https://aistudio.google.com/apikey) 申请一个 Gemini API Key（有免费额度）→ 右上角 ⚙️ 设置 →“自己的 API Key” → 填入 → 点“测试 Key 并检测可用模型” → 保存。两种都填时优先用自己的 Key。
+
+然后：
+
+1. 选择口音（美式/英式）、难度、模式（沉浸 / 辅助），挑一个场景开始对话。对方会先开口。
+2. 点“结束并查看总结”查看逐句回放和整体点评。
 
 ## 工作原理
 
-纯前端静态网站，不需要后端服务器，可以直接托管在 GitHub Pages：
+前端是纯静态网站，托管在 GitHub Pages。用自己的 Key 时浏览器直连 Google；用邀请码时通过一个很小的 Cloudflare Worker 中转（见 [`worker/README.md`](worker/README.md)）：实时对话由 Worker 签发一次性临时令牌，浏览器拿令牌直连 Gemini Live；点评和语音请求由 Worker 代理。站长的 Key 只存在 Worker 的 secret 里，不会出现在网页代码中。
 
 | 功能 | 使用的 Gemini 接口（可在设置里改模型） |
 | --- | --- |
@@ -31,7 +36,8 @@
 
 ## API Key 安全
 
-- Key 只保存在你自己设备的浏览器（localStorage）里，只会直接发送给 Google 的 API，不经过任何第三方服务器。
+- **邀请码模式**：站长的 Key 只在 Cloudflare Worker 的 secret 里，网页上拿到的只有几分钟就过期、只能用一次的临时令牌。另外有按设备、按全站的每日分钟限额，以及防止暴力猜邀请码的限流。
+- **自己的 Key**：只保存在你自己设备的浏览器（localStorage）里，只会直接发送给 Google 的 API，不经过任何第三方服务器。
 - 强烈建议在 [Google Cloud 控制台 → 凭据](https://console.cloud.google.com/apis/credentials) 中为这个 Key 设置：
   - 应用限制 → 网站（HTTP referrer）：`https://yefan-zhi.github.io/*`（本地开发可再加 `http://localhost:5173/*`）
   - API 限制 → 只允许 Generative Language API
@@ -44,6 +50,8 @@ npm install
 npm run dev      # http://localhost:5173
 npm run build    # 输出到 dist/
 ```
+
+中转服务（Worker）的本地调试和部署见 [`worker/README.md`](worker/README.md)：`npm run worker:dev` / `npm run worker:deploy`。
 
 推送到 `main` 分支后，GitHub Actions（`.github/workflows/deploy.yml`）会自动构建并发布到 GitHub Pages。
 

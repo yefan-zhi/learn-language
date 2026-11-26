@@ -1,5 +1,7 @@
 // 设置弹窗
-import { getSettings, setSetting, LIVE_VOICES, TTS_VOICES, DEFAULTS } from "../lib/settings.js";
+import { getSettings, setSetting, LIVE_VOICES, TTS_VOICES, DEFAULTS, authMode } from "../lib/settings.js";
+import { getQuota } from "../lib/relay.js";
+import { relayConfigured } from "../lib/config.js";
 import { listModels, pickModels } from "../lib/gemini-rest.js";
 import { escapeHtml } from "../lib/dom.js";
 
@@ -7,6 +9,7 @@ export function openSettings(opts = {}) {
   if (document.querySelector("view-settings")) return;
   const el = document.createElement("view-settings");
   el.firstRun = !!opts.firstRun;
+  el.tab = opts.tab;
   document.body.appendChild(el);
 }
 
@@ -21,7 +24,27 @@ class ViewSettings extends HTMLElement {
             <h3>⚙️ 设置</h3>
             <button class="icon-btn" id="close" aria-label="关闭">✕</button>
           </div>
-          ${this.firstRun ? `<p class="note">欢迎！本工具直接在你的浏览器里调用 Google Gemini，需要你自己的 API Key（在 Google AI Studio 免费申请，按量计费/有免费额度）。</p>` : ""}
+          <h4>🔑 接入方式</h4>
+          <div class="segmented" id="auth-tabs">
+            <button data-tab="invite" type="button">邀请码（用站长的额度）</button>
+            <button data-tab="key" type="button">自己的 API Key</button>
+          </div>
+          <small class="opt-desc">同时填了两种时，优先使用自己的 Key。当前：<b id="auth-now"></b></small>
+
+          <div id="panel-invite">
+            <label class="field">
+              <span>邀请码</span>
+              <div class="row">
+                <input id="inviteCode" type="text" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="朋友给你的邀请码" value="${escapeHtml(s.inviteCode)}">
+                <button class="small-btn primary" id="check-invite" type="button">验证</button>
+              </div>
+              <small>${relayConfigured() ? "使用站长提供的额度（每台设备每天有分钟数上限）。" : "⚠️ 站长还没有部署中转服务，邀请码暂时不可用。"}</small>
+            </label>
+            <p class="status-line" id="invite-status"></p>
+          </div>
+
+          <div id="panel-key">
+          ${this.firstRun ? `<p class="note">本工具直接在你的浏览器里调用 Google Gemini，需要你自己的 API Key（在 Google AI Studio 免费申请，有免费额度）。</p>` : ""}
 
           <label class="field">
             <span>Gemini API Key</span>
@@ -44,6 +67,7 @@ class ViewSettings extends HTMLElement {
               <li>在公用电脑上用完后，可以点下面的“清除 Key”。</li>
             </ul>
           </details>
+          </div>
 
           <h4>🧑‍🏫 老师点评</h4>
           <label class="check"><input type="checkbox" id="teacherVoiceOn" ${s.teacherVoiceOn ? "checked" : ""}> 每句话后用中文语音点评（关闭后只显示文字）</label>
@@ -82,7 +106,11 @@ class ViewSettings extends HTMLElement {
               <input id="ttsModel" list="tts-models" value="${escapeHtml(s.ttsModel)}" spellcheck="false">
               <datalist id="tts-models"></datalist>
             </label>
-            <button class="small-btn" id="reset-models" type="button">恢复默认模型</button>
+            <div class="row gap">
+              <button class="small-btn" id="reset-models" type="button">恢复默认模型</button>
+              <button class="small-btn" id="detect-invite" type="button">通过邀请码检测模型</button>
+            </div>
+            <p class="status-line" id="detect-status"></p>
           </details>
 
           <div class="modal-foot">
@@ -95,6 +123,39 @@ class ViewSettings extends HTMLElement {
 
     const $ = (id) => this.querySelector(`#${id}`);
     const close = () => this.remove();
+
+    // 接入方式切换
+    const modeLabel = { key: "自己的 API Key", invite: "邀请码", null: "未设置" };
+    const refreshNow = () => {
+      const k = $("apiKey").value.trim();
+      const inv = $("inviteCode").value.trim();
+      $("auth-now").textContent = k ? modeLabel.key : inv ? modeLabel.invite : modeLabel.null;
+    };
+    const showTab = (tab) => {
+      this.querySelectorAll("#auth-tabs button").forEach((b) => b.classList.toggle("active", b.dataset.tab === tab));
+      $("panel-invite").hidden = tab !== "invite";
+      $("panel-key").hidden = tab !== "key";
+    };
+    this.querySelectorAll("#auth-tabs button").forEach((b) => (b.onclick = () => showTab(b.dataset.tab)));
+    showTab(this.tab || (authMode() === "key" ? "key" : relayConfigured() ? "invite" : "key"));
+    refreshNow();
+    $("apiKey").addEventListener("input", refreshNow);
+    $("inviteCode").addEventListener("input", refreshNow);
+    $("check-invite").onclick = async () => {
+      const code = $("inviteCode").value.trim();
+      const st = $("invite-status");
+      if (!code) {
+        st.textContent = "请先输入邀请码";
+        return;
+      }
+      st.textContent = "验证中…";
+      try {
+        const q = await getQuota(code);
+        st.textContent = `✅ 邀请码有效，今天还可以练习 ${q.remainingMinutes} 分钟。别忘了点“保存”。`;
+      } catch (e) {
+        st.textContent = `❌ ${e.message}`;
+      }
+    };
     $("close").onclick = close;
     this.querySelector(".modal-backdrop").addEventListener("click", (e) => {
       if (e.target.classList.contains("modal-backdrop")) close();
@@ -116,13 +177,7 @@ class ViewSettings extends HTMLElement {
       $("test-status").textContent = "已清除。";
     };
 
-    $("test").onclick = async () => {
-      const key = $("apiKey").value.trim();
-      const st = $("test-status");
-      if (!key) {
-        st.textContent = "请先填入 API Key";
-        return;
-      }
+    const detect = async (key, st) => {
       st.textContent = "检测中…";
       try {
         const models = await listModels(key);
@@ -145,15 +200,37 @@ class ViewSettings extends HTMLElement {
           $("teacherModel").value = picked.text.find((m) => /flash/.test(m) && !/lite/.test(m)) || picked.text[0];
           notes.push(`老师模型已切换为 ${$("teacherModel").value}`);
         }
-        if (!picked.live.length) notes.push("⚠️ 这个 Key 没有可用的 Live API 模型");
-        st.innerHTML = `✅ Key 可用。找到 ${picked.live.length} 个实时对话模型。${notes.length ? "<br>" + notes.map(escapeHtml).join("<br>") : ""}<br>别忘了点“保存”。`;
+        if (!picked.live.length) notes.push("⚠️ 没有可用的 Live API 模型");
+        st.innerHTML = `✅ 可用。找到 ${picked.live.length} 个实时对话模型。${notes.length ? "<br>" + notes.map(escapeHtml).join("<br>") : ""}<br>别忘了点“保存”。`;
       } catch (e) {
         st.textContent = `❌ ${e.message}`;
       }
     };
 
+    $("test").onclick = () => {
+      const key = $("apiKey").value.trim();
+      const st = $("test-status");
+      if (!key) {
+        st.textContent = "请先填入 API Key";
+        return;
+      }
+      detect(key, st);
+    };
+
+    $("detect-invite").onclick = () => {
+      const code = $("inviteCode").value.trim();
+      const st = $("detect-status");
+      if (!code) {
+        st.textContent = "请先在上面填入邀请码";
+        return;
+      }
+      setSetting("inviteCode", code);
+      detect(undefined, st);
+    };
+
     $("save").onclick = () => {
       setSetting("apiKey", $("apiKey").value.trim());
+      setSetting("inviteCode", $("inviteCode").value.trim());
       setSetting("teacherVoiceOn", $("teacherVoiceOn").checked);
       setSetting("teacherVoiceSource", $("teacherVoiceSource").value);
       setSetting("teacherVoice", $("teacherVoice").value);

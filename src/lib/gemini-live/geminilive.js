@@ -10,7 +10,7 @@ const WS_URL =
 export class LiveSession {
   /**
    * @param {object} opts
-   *  apiKey, model, systemInstruction, voiceName, functionDeclarations,
+   *  apiKey | url, model, systemInstruction, voiceName, functionDeclarations,
    *  inputTranscription, outputTranscription, silenceDurationMs
    */
   constructor(opts) {
@@ -33,7 +33,9 @@ export class LiveSession {
   }
 
   connect() {
-    const { apiKey } = this.opts;
+    const { apiKey, url } = this.opts;
+    // url：邀请码模式下中转服务返回的 ephemeral token 地址（BidiGenerateContentConstrained?access_token=...）
+    const wsUrl = url || `${WS_URL}?key=${encodeURIComponent(apiKey)}`;
     return new Promise((resolve, reject) => {
       let settled = false;
       const fail = (err) => {
@@ -44,7 +46,7 @@ export class LiveSession {
       };
       let ws;
       try {
-        ws = new WebSocket(`${WS_URL}?key=${encodeURIComponent(apiKey)}`);
+        ws = new WebSocket(wsUrl);
       } catch (e) {
         fail(e);
         return;
@@ -198,6 +200,9 @@ export class LiveSession {
 
 function explainClose(code, reason) {
   const r = (reason || "").toLowerCase();
+  if (r.includes("token") && (r.includes("expire") || r.includes("invalid") || r.includes("used"))) {
+    return `临时令牌无效或已过期，请重新开始：${reason}`;
+  }
   if (r.includes("api key") || r.includes("api_key") || r.includes("permission") || r.includes("unauthenticated")) {
     return `API Key 无效或没有权限：${reason}`;
   }

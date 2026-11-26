@@ -2,6 +2,7 @@
 
 export const DEFAULTS = {
   apiKey: "",
+  inviteCode: "",
   liveModel: "gemini-2.5-flash-native-audio-preview-12-2025",
   teacherModel: "gemini-2.5-flash",
   ttsModel: "gemini-2.5-flash-preview-tts",
@@ -54,6 +55,37 @@ export function getSettings() {
 
 export function hasApiKey() {
   return !!(read("apiKey") || "").trim();
+}
+
+export function hasInvite() {
+  return !!(read("inviteCode") || "").trim();
+}
+
+/** 当前接入方式：有自己的 Key 优先用 Key，其次邀请码 */
+export function authMode() {
+  if (hasApiKey()) return "key";
+  if (hasInvite()) return "invite";
+  return null;
+}
+
+export function hasAccess() {
+  return authMode() !== null;
+}
+
+/** 本设备的随机标识（用于邀请码模式按设备限额） */
+export function getDeviceId() {
+  const k = PREFIX + "deviceId";
+  try {
+    let id = localStorage.getItem(k);
+    if (!id || !/^[A-Za-z0-9-]{8,64}$/.test(id)) {
+      id = (crypto.randomUUID ? crypto.randomUUID() : Array.from(crypto.getRandomValues(new Uint8Array(16)), (b) => b.toString(16).padStart(2, "0")).join(""));
+      localStorage.setItem(k, id);
+    }
+    return id;
+  } catch {
+    if (!window.__llDeviceId) window.__llDeviceId = crypto.randomUUID();
+    return window.__llDeviceId;
+  }
 }
 
 export const ACCENTS = {

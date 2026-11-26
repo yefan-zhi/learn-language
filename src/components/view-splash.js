@@ -1,5 +1,8 @@
-import { hasApiKey } from "../lib/settings.js";
+import { authMode, hasAccess } from "../lib/settings.js";
 import { openSettings } from "./view-settings.js";
+import { openInvite } from "./view-invite.js";
+import { relayConfigured } from "../lib/config.js";
+import { getQuota } from "../lib/relay.js";
 
 class ViewSplash extends HTMLElement {
   connectedCallback() {
@@ -22,20 +25,39 @@ class ViewSplash extends HTMLElement {
       </div>
     `;
     const hint = this.querySelector("#key-hint");
+    const askAccess = () => (relayConfigured() ? openInvite() : openSettings({ firstRun: true }));
     const refresh = () => {
-      hint.innerHTML = hasApiKey()
-        ? "已设置 Gemini API Key ✓"
-        : `首次使用需要填入你自己的 <a href="#" id="set-key">Gemini API Key</a>（免费申请）`;
+      const mode = authMode();
+      if (mode === "key") {
+        hint.innerHTML = "使用自己的 Gemini API Key ✓";
+      } else if (mode === "invite") {
+        hint.innerHTML = "使用邀请码 ✓ <span id=\"quota\"></span>";
+        getQuota()
+          .then((q) => {
+            const el = this.querySelector("#quota");
+            if (el) el.textContent = `· 今天还可以练习 ${q.remainingMinutes} 分钟`;
+          })
+          .catch((e) => {
+            const el = this.querySelector("#quota");
+            if (el) el.textContent = `· ${e.message}`;
+          });
+      } else {
+        hint.innerHTML = relayConfigured()
+          ? `首次使用请 <a href="#" id="set-invite">输入邀请码</a>，或者 <a href="#" id="set-key">用自己的 Gemini API Key</a>`
+          : `首次使用需要填入你自己的 <a href="#" id="set-key">Gemini API Key</a>（免费申请）`;
+      }
       const a = this.querySelector("#set-key");
-      if (a) a.onclick = (e) => { e.preventDefault(); openSettings({ firstRun: true }); };
+      if (a) a.onclick = (e) => { e.preventDefault(); openSettings({ firstRun: true, tab: "key" }); };
+      const b = this.querySelector("#set-invite");
+      if (b) b.onclick = (e) => { e.preventDefault(); openInvite(); };
     };
     refresh();
     this._onSettings = refresh;
     window.addEventListener("settings-changed", refresh);
 
     this.querySelector("#start").onclick = () => {
-      if (!hasApiKey()) {
-        openSettings({ firstRun: true });
+      if (!hasAccess()) {
+        askAccess();
         return;
       }
       this.dispatchEvent(new CustomEvent("navigate", { bubbles: true, detail: { view: "missions" } }));

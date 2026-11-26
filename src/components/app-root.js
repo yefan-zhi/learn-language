@@ -8,7 +8,9 @@ import "./view-chat.js";
 import "./view-summary.js";
 import "./view-history.js";
 import { openSettings } from "./view-settings.js";
-import { hasApiKey } from "../lib/settings.js";
+import { hasAccess } from "../lib/settings.js";
+import { relayConfigured } from "../lib/config.js";
+import { openInvite } from "./view-invite.js";
 
 class AppRoot extends HTMLElement {
   constructor() {
@@ -52,7 +54,7 @@ class AppRoot extends HTMLElement {
     this.addEventListener("navigate", (e) => this.go(e.detail));
     this.render();
 
-    if (!hasApiKey()) setTimeout(() => openSettings({ firstRun: true }), 400);
+    if (!hasAccess()) setTimeout(() => (relayConfigured() ? openInvite() : openSettings({ firstRun: true })), 400);
   }
 
   go(detail) {

@@ -1,7 +1,10 @@
 import missionsData from "../data/missions.json";
-import { getSetting, setSetting, ACCENTS, LEVELS, hasApiKey } from "../lib/settings.js";
+import { getSetting, setSetting, ACCENTS, LEVELS, hasAccess, authMode } from "../lib/settings.js";
 import { escapeHtml } from "../lib/dom.js";
 import { openSettings } from "./view-settings.js";
+import { openInvite } from "./view-invite.js";
+import { relayConfigured } from "../lib/config.js";
+import { getQuota } from "../lib/relay.js";
 
 const DIFF = {
   Easy: ["简单", "#8bc34a"],
@@ -41,6 +44,7 @@ class ViewMissions extends HTMLElement {
           </div>
         </div>
 
+        <p class="quota-line" id="quota-line" hidden></p>
         <h2 class="section-title">选择一个场景</h2>
         <div class="mission-grid"></div>
       </div>
@@ -63,6 +67,26 @@ class ViewMissions extends HTMLElement {
     });
 
     this.renderMissions();
+    this.showQuota();
+  }
+
+  /** 邀请码模式下显示今日剩余分钟数 */
+  showQuota() {
+    const el = this.querySelector("#quota-line");
+    if (!el || authMode() !== "invite") return;
+    getQuota()
+      .then((q) => {
+        el.hidden = false;
+        el.classList.toggle("empty", q.remainingMinutes < 1);
+        el.textContent =
+          q.remainingMinutes < 1
+            ? "🎟️ 今天的练习额度已经用完了，明天再来吧～"
+            : `🎟️ 邀请码额度：今天还可以练习 ${q.remainingMinutes} 分钟（单次最多 ${Math.min(q.remainingMinutes, q.sessionMaxMinutes)} 分钟）`;
+      })
+      .catch((e) => {
+        el.hidden = false;
+        el.textContent = `🎟️ ${e.message}`;
+      });
   }
 
   renderMissions() {
@@ -86,8 +110,8 @@ class ViewMissions extends HTMLElement {
         <div class="mc-role">对方：${escapeHtml(m.role_zh)} · ${accent.city}</div>
       `;
       const start = () => {
-        if (!hasApiKey()) {
-          openSettings({ firstRun: true });
+        if (!hasAccess()) {
+          relayConfigured() ? openInvite() : openSettings({ firstRun: true });
           return;
         }
         const topic = m.custom ? (card.querySelector(".topic-input").value || "").trim() : "";

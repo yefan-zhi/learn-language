@@ -5,7 +5,8 @@ import "./audio-visualizer.js";
 import { LiveSession } from "../lib/gemini-live/geminilive.js";
 import { AudioStreamer, AudioPlayer } from "../lib/gemini-live/mediaUtils.js";
 import { concatInt16, trimSilence, formatDuration } from "../lib/audio-utils.js";
-import { getSetting, setSetting, ACCENTS, LEVELS } from "../lib/settings.js";
+import { getSetting, setSetting, ACCENTS, LEVELS, authMode } from "../lib/settings.js";
+import { startRelaySession, reportUsage } from "../lib/relay.js";
 import { analyzeTurn, teacherTTS, nativeTTS, speakBrowser, stopBrowserSpeech, unlockBrowserSpeech } from "../lib/teacher.js";
 import { escapeHtml, feedbackHtml } from "../lib/dom.js";
 
@@ -191,8 +192,20 @@ class ViewChat extends HTMLElement {
       this.$("user-viz").connect(this.streamer.audioContext, this.streamer.source);
       this.$("model-viz").connect(this.player.audioContext, this.player.gainNode);
 
+      // 邀请码模式：先向中转服务申请一次性令牌（同时预留今日额度）
+      this.sessionLimitSec = SESSION_LIMIT_SEC;
+      let relay = null;
+      if (authMode() === "invite") {
+        this.setStatus("正在申请练习额度…");
+        relay = await startRelaySession();
+        this.relaySession = relay;
+        this.relayReported = false;
+        this.sessionLimitSec = Math.min(SESSION_LIMIT_SEC, relay.grantedMinutes * 60);
+      }
+
       const live = new LiveSession({
-        apiKey: getSetting("apiKey"),
+        apiKey: relay ? undefined : getSetting("apiKey"),
+        url: relay ? relay.wsUrl : undefined,
         model: getSetting("liveModel"),
         voiceName: getSetting("characterVoice"),
         systemInstruction: buildSystemInstruction(cfg),
@@ -229,6 +242,7 @@ class ViewChat extends HTMLElement {
       live.onClose = (info) => {
         if (info.byUser || this.state !== "active") return;
         this.state = "ended-unexpectedly";
+        this.finishRelay();
         this.stopAudio();
         this.setStatus(`⚠️ ${info.message}`, "var(--color-danger)");
         const b = this.$("main-btn");
@@ -242,12 +256,18 @@ class ViewChat extends HTMLElement {
       await live.connect();
       this.state = "active";
       this.session.startedAt = Date.now();
+      this.connectedAt = this.session.startedAt;
       live.sendText("[START]");
 
       btn.disabled = false;
       btn.textContent = "结束并查看总结";
       btn.classList.add("active");
-      this.setStatus("已连接，对方马上开口…", "var(--color-success)");
+      this.setStatus(
+        relay ? `已连接，对方马上开口…（本次最多 ${relay.grantedMinutes} 分钟）` : "已连接，对方马上开口…",
+        "var(--color-success)"
+      );
+      this._onPageHide = () => this.finishRelay();
+      window.addEventListener("pagehide", this._onPageHide);
       const hint = this.$("empty-hint");
       if (hint) hint.remove();
 
@@ -257,6 +277,7 @@ class ViewChat extends HTMLElement {
       this.state = "error";
       this.stopAudio();
       if (this.live) this.live.close();
+      this.finishRelay();
       btn.disabled = false;
       btn.textContent = "重试";
       let msg = err.message || String(err);
@@ -271,9 +292,13 @@ class ViewChat extends HTMLElement {
     if (!el || this.state !== "active") return;
     const sec = (Date.now() - this.session.startedAt) / 1000;
     el.textContent = formatDuration(sec);
-    el.classList.toggle("warn", sec > SESSION_LIMIT_SEC - 60);
-    if (sec >= SESSION_LIMIT_SEC - 5) {
-      this.setStatus("已达到单次练习时长上限（15 分钟）", "var(--color-accent-secondary)");
+    const limit = this.sessionLimitSec || SESSION_LIMIT_SEC;
+    el.classList.toggle("warn", sec > limit - 60);
+    if (sec >= limit - 5) {
+      this.setStatus(
+        limit < SESSION_LIMIT_SEC ? `已用完今天的剩余额度（${Math.round(limit / 60)} 分钟）` : "已达到单次练习时长上限（15 分钟）",
+        "var(--color-accent-secondary)"
+      );
       this.endSession();
       return;
     }
@@ -292,7 +317,18 @@ class ViewChat extends HTMLElement {
     this.player = null;
   }
 
+  /** 邀请码模式：上报实际用时，退回没用完的额度（只上报一次） */
+  finishRelay() {
+    if (!this.relaySession || this.relayReported) return;
+    this.relayReported = true;
+    const started = this.connectedAt;
+    const minutes = started ? (Date.now() - started) / 60000 : 0;
+    reportUsage(this.relaySession.sessionId, Math.round(minutes * 100) / 100);
+    if (this._onPageHide) window.removeEventListener("pagehide", this._onPageHide);
+  }
+
   cleanup() {
+    this.finishRelay();
     if (this.live) this.live.close();
     this.stopAudio();
     this.state = this.state === "active" ? "ended" : this.state;
@@ -309,6 +345,7 @@ class ViewChat extends HTMLElement {
     if (this.live) this.live.close();
     this.stopAudio();
     this.session.endedAt = Date.now();
+    this.finishRelay();
     this.dispatchEvent(new CustomEvent("navigate", { bubbles: true, detail: { view: "summary", session: this.session } }));
   }
 
